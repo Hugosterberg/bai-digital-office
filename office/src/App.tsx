@@ -1221,6 +1221,7 @@ function TaskCard({
 
 function PrReviewRow({ repo, pr, domain }: { repo: string; pr: ReviewPr; domain?: string }) {
   const qc = useQueryClient();
+  const [branchCopied, setBranchCopied] = useState(false);
   const detailQuery = useQuery({
     queryKey: ["pr", repo, pr.number],
     queryFn: () =>
@@ -1255,12 +1256,29 @@ function PrReviewRow({ repo, pr, domain }: { repo: string; pr: ReviewPr; domain?
           ? "CI failed"
           : "CI unknown";
 
+  const copyBranchRef = () => {
+    const text = `${repo} — ${pr.branch} (PR #${pr.number})`;
+    void navigator.clipboard.writeText(text);
+    setBranchCopied(true);
+    setTimeout(() => setBranchCopied(false), 2000);
+  };
+
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-md border border-bai-line/80 bg-bai-bg/50 px-2.5 py-2">
-      <a href={pr.url} target="_blank" rel="noreferrer" className="min-w-0 flex-1 text-sm text-bai-fg hover:text-bai-orange">
-        <span className="text-bai-mute">#{pr.number}</span> {pr.title}
-        <code className="ml-2 text-[10px] text-bai-mute">{pr.branch}</code>
-      </a>
+      <div className="min-w-0 flex-1 space-y-1">
+        <a href={pr.url} target="_blank" rel="noreferrer" className="block text-sm text-bai-fg hover:text-bai-orange">
+          <span className="text-bai-mute">#{pr.number}</span> {pr.title}
+        </a>
+        <button
+          type="button"
+          onClick={copyBranchRef}
+          title="Copy repo + branch — paste in chat to request a merge to main"
+          className="inline-flex max-w-full items-center gap-1.5 rounded border border-bai-line/80 bg-bai-surface/60 px-2 py-0.5 text-left hover:border-bai-orange/50 hover:bg-bai-orange/10"
+        >
+          <code className="truncate text-[10px] text-bai-metal">{pr.branch}</code>
+          <span className="shrink-0 text-[10px] text-bai-mute">{branchCopied ? "Copied" : "Copy"}</span>
+        </button>
+      </div>
       <span
         className={`text-[10px] ${
           checks?.state === "success" ? "text-emerald-400" : checks?.state === "failure" ? "text-red-400" : "text-bai-mute"
