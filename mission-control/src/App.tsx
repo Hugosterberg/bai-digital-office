@@ -224,10 +224,61 @@ function isQuiet(board: Board): boolean {
   return board.tasks.length === 0 && board.prs.length === 0;
 }
 
+/**
+ * Portfolio overview — every project at a glance, one compact card each.
+ * Clicking a card scrolls to that project's board (or its quiet row).
+ */
+function PortfolioOverview({ boards }: { boards: Board[] }) {
+  return (
+    <section className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4">
+      {boards.map((board) => {
+        const count = (stage: TaskIssue["stage"]) => board.tasks.filter((t) => t.stage === stage).length;
+        const quiet = isQuiet(board);
+        return (
+          <button
+            key={board.project.id}
+            type="button"
+            onClick={() =>
+              document
+                .getElementById(`project-${board.project.id}`)
+                ?.scrollIntoView({ behavior: "smooth", block: "start" })
+            }
+            className={`rounded-lg border p-3 text-left transition-colors ${
+              board.prs.length > 0
+                ? "border-blue-800 bg-blue-950/20 hover:border-blue-600"
+                : quiet
+                  ? "border-zinc-800/60 bg-zinc-900/30 hover:border-zinc-700"
+                  : "border-zinc-700 bg-zinc-900 hover:border-zinc-500"
+            }`}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <p className="truncate text-sm font-semibold text-zinc-100">{board.project.name}</p>
+              {board.prs.length > 0 ? (
+                <span className="shrink-0 rounded-full bg-blue-600 px-1.5 text-[10px] font-bold text-white">
+                  {board.prs.length} PR
+                </span>
+              ) : null}
+            </div>
+            {quiet ? (
+              <p className="mt-1.5 text-[11px] text-zinc-600">quiet</p>
+            ) : (
+              <p className="mt-1.5 flex gap-2.5 text-[11px] tabular-nums">
+                <span className="text-emerald-400">{count("agent:ready")} ready</span>
+                <span className="text-amber-400">{count("agent:building")} building</span>
+                <span className="text-blue-400">{count("agent:review")} review</span>
+              </p>
+            )}
+          </button>
+        );
+      })}
+    </section>
+  );
+}
+
 /** One slim row for a project with no agent activity — no empty-column noise. */
 function QuietProjectRow({ board, onNewTask }: { board: Board; onNewTask: (id: string) => void }) {
   return (
-    <div className="flex items-center gap-3 rounded-md border border-zinc-800/70 bg-zinc-900/40 px-3 py-2">
+    <div id={`project-${board.project.id}`} className="scroll-mt-4 flex items-center gap-3 rounded-md border border-zinc-800/70 bg-zinc-900/40 px-3 py-2">
       <span className="text-sm font-medium text-zinc-300">{board.project.name}</span>
       <a
         className="text-[11px] text-zinc-600 hover:text-zinc-400"
@@ -381,6 +432,7 @@ function MissionControl() {
           {boardQuery.isError ? (
             <p className="text-sm text-red-400">{(boardQuery.error as Error).message}</p>
           ) : null}
+          {boards.length > 0 ? <PortfolioOverview boards={boards} /> : null}
           {activeBoards.map((board) => (
             <ProjectBoard key={board.project.id} board={board} />
           ))}
