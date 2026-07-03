@@ -7,7 +7,11 @@
  *   POST /api/dispatch   — dispatch agent on existing agent:ready task
  *   POST /api/prs/merge  — squash-merge PR → Vercel deploys main
  *   GET  /api/prs/detail — PR + CI status
- *   GET  /api/dispatches — agent run history + Claude spend
+ *   GET  /api/agents     — agent provider catalog + availability
+ *   GET  /api/dispatches — agent run history + spend by provider
+ *   POST /api/runs       — log a manual run (Cursor, interactive Claude, API)
+ *   GET  /api/budgets    — per-project limits + spend status
+ *   PUT  /api/budgets    — set limits for a project
  */
 import express from "express";
 import cors from "cors";
@@ -23,12 +27,15 @@ import {
   getPullRequestDetail,
   mergePullRequest,
 } from "./lib/github.ts";
+import { agentCatalog } from "./lib/agents.ts";
+import { readAllBudgets, setProjectBudget, budgetStatusForProjects } from "./lib/budgets.ts";
 import {
   listDispatches,
   spendSummary,
   startDispatch,
   dispatchAvailable,
   runningDispatchCount,
+  logManualRun,
 } from "./lib/dispatch.ts";
 import { startAgentPoller } from "./lib/agentPoller.ts";
 import { requireWriteAuth } from "./lib/auth.ts";
@@ -51,6 +58,10 @@ app.get("/api/health", (_req, res) => {
 
 app.get("/api/projects", (_req, res) => {
   res.json({ projects: PROJECTS, github: githubConfigured(), dispatch: dispatchAvailable() });
+});
+
+app.get("/api/agents", (_req, res) => {
+  res.json({ providers: agentCatalog(dispatchAvailable()), defaultProvider: "claude-code" });
 });
 
 app.get("/api/board", async (req, res) => {
@@ -139,6 +150,7 @@ app.post("/api/dispatch", requireWriteAuth, async (req, res) => {
     repo: project.repo,
     issueNumber,
     title: title || task.title,
+    provider: String(req.body?.provider || "claude-code"),
   });
   if (!dispatch.ok) {
     return res.status(dispatch.status).json({ error: dispatch.error });
@@ -189,6 +201,52 @@ app.post("/api/prs/merge", requireWriteAuth, async (req, res) => {
 
 app.get("/api/dispatches", (_req, res) => {
   res.json({ dispatches: listDispatches(), spend: spendSummary() });
+});
+
+/** Log a run done outside office auto-dispatch (Cursor, interactive Claude, API). */
+app.post("/api/runs", requireWriteAuth, (req, res) => {
+  const project = findProject(String(req.body?.project || ""));
+  const issueNumber = Number(req.body?.issueNumber);
+  const title = String(req.body?.title || "").trim();
+  if (!project) return res.status(400).json({ error: "Unknown project." });
+  if (!Number.isInteger(issueNumber) || issueNumber < 1) {
+    return res.status(400).json({ error: "issueNumber is required." });
+  }
+  if (!title) return res.status(400).json({ error: "title is required." });
+
+  const run = logManualRun({
+    provider: String(req.body?.provider || ""),
+    repo: project.repo,
+    issueNumber,
+    title,
+    costUsd: req.body?.costUsd != null ? Number(req.body.costUsd) : undefined,
+    durationMs: req.body?.durationMs != null ? Number(req.body.durationMs) : undefined,
+    notes: String(req.body?.notes || ""),
+  });
+  res.json({ ok: true, run });
+});
+
+app.get("/api/budgets", (_req, res) => {
+  const spend = spendSummary();
+  res.json({ budgets: spend.budgets, configs: readAllBudgets() });
+});
+
+app.put("/api/budgets", requireWriteAuth, (req, res) => {
+  const projectId = String(req.body?.project || "").trim();
+  if (!findProject(projectId)) {
+    return res.status(400).json({ error: "Unknown project." });
+  }
+  try {
+    const config = setProjectBudget(projectId, {
+      dailyUsd: req.body?.dailyUsd != null ? Number(req.body.dailyUsd) : undefined,
+      monthlyUsd: req.body?.monthlyUsd != null ? Number(req.body.monthlyUsd) : undefined,
+      totalUsd: req.body?.totalUsd != null ? Number(req.body.totalUsd) : undefined,
+    });
+    const status = budgetStatusForProjects(spendSummary().byProject).find((b) => b.projectId === projectId);
+    res.json({ ok: true, config, status });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : "Could not save budget." });
+  }
 });
 
 /** Production: serve the Vite build. */

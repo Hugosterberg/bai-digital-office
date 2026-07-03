@@ -27,3 +27,8 @@ export const PROJECTS: Project[] = [
 export function findProject(id: string): Project | null {
   return PROJECTS.find((p) => p.id === id) ?? null;
 }
+
+export function findProjectByRepo(repo: string): Project | null {
+  const normalized = String(repo || "").trim().toLowerCase();
+  return PROJECTS.find((p) => p.repo.toLowerCase() === normalized) ?? null;
+}

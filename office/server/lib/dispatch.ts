@@ -1,89 +1,27 @@
 /**
- * Agent dispatch — the "self-driving" part of bai digital office.
+ * Agent dispatch — headless Claude Code runs from office.
  *
- * Dispatching a ready task spawns a headless Claude Code run (`claude -p`)
- * on this machine with the full BAI agent contract: read the issue, clone
- * the repo, build the slice on a feat/ branch, verify green, open a PR that
- * closes the issue, and move the stage labels. The GUI polls dispatch state
- * so a running agent is visible on the board.
- *
- * Permissions: the agent runs with an explicit tool allowlist (git/gh/npm/
- * node/npx + file tools) in acceptEdits mode — anything outside the list is
- * refused in headless mode. Local tool only; never expose beyond localhost.
+ * Only `claude-code` provider is auto-dispatched here. Cursor, interactive
+ * Claude, and direct API agents are started manually — log them via POST /api/runs.
  */
 
 import { spawn } from "node:child_process";
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { normalizeProviderId, type AgentProviderId } from "./agents.ts";
+import { findProjectByRepo } from "./projects.ts";
+import { overBudgetMessage } from "./budgets.ts";
+import { type AgentRun, persistRun, listRecentRuns, spendSummary, enrichRun } from "./runs.ts";
 
-export interface DispatchState {
-  id: string;
-  repo: string;
-  issueNumber: number;
-  title: string;
-  status: "running" | "done" | "failed";
-  startedAt: string;
-  finishedAt?: string;
-  /** Last chunk of agent output — enough to see where it landed. */
-  outputTail: string;
-  /** From the run's result JSON (claude -p --output-format json). */
-  costUsd?: number;
-  durationMs?: number;
-  numTurns?: number;
-  resultSummary?: string;
-}
+export type { AgentRun, SpendSummary, EnrichedAgentRun } from "./runs.ts";
+export { spendSummary, listRecentRuns, logManualRun, enrichRun, issueKey } from "./runs.ts";
 
-const dispatches = new Map<string, DispatchState>();
+const dispatches = new Map<string, AgentRun>();
 const MAX_TAIL = 4_000;
 const MAX_CONCURRENT = 3;
 
-/** Finished runs persist as JSONL so agent history and spend survive restarts. */
-const RUNS_FILE = join(dirname(fileURLToPath(import.meta.url)), "..", "data", "agent-runs.jsonl");
-
-function readRuns(): DispatchState[] {
-  try {
-    return readFileSync(RUNS_FILE, "utf8")
-      .split("\n")
-      .filter((line) => line.trim())
-      .map((line) => JSON.parse(line) as DispatchState);
-  } catch {
-    return []; // no history yet
-  }
-}
-
-for (const run of readRuns().slice(-20)) dispatches.set(run.id, run);
-
-function persistRun(state: DispatchState): void {
-  try {
-    mkdirSync(dirname(RUNS_FILE), { recursive: true });
-    appendFileSync(RUNS_FILE, JSON.stringify(state) + "\n");
-  } catch (err) {
-    console.warn("[dispatch] could not persist run:", err);
-  }
-}
-
-export interface SpendSummary {
-  totalUsd: number;
-  todayUsd: number;
-  runs: number;
-}
-
-/** Claude spend across all persisted runs (+ nothing for still-running ones). */
-export function spendSummary(): SpendSummary {
-  const today = new Date().toISOString().slice(0, 10);
-  let totalUsd = 0;
-  let todayUsd = 0;
-  let runs = 0;
-  for (const run of readRuns()) {
-    const cost = Number(run.costUsd) || 0;
-    totalUsd += cost;
-    runs += 1;
-    if (String(run.startedAt).slice(0, 10) === today) todayUsd += cost;
-  }
-  return { totalUsd, todayUsd, runs };
-}
+for (const run of listRecentRuns(20)) dispatches.set(run.id, run);
 
 /** Tools the dispatched agent may use without per-call approval. */
 const AGENT_ALLOWED_TOOLS = [
@@ -99,10 +37,11 @@ const AGENT_ALLOWED_TOOLS = [
   "Grep",
 ].join(",");
 
-export function listDispatches(): DispatchState[] {
-  return [...dispatches.values()]
-    .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
-    .slice(0, 20);
+export function listDispatches(): ReturnType<typeof enrichRun>[] {
+  const live = [...dispatches.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+  const seen = new Set(live.map((d) => d.id));
+  const persisted = listRecentRuns(30).filter((r) => !seen.has(r.id));
+  return [...live, ...persisted].slice(0, 30).map(enrichRun);
 }
 
 export function runningDispatchCount(): number {
@@ -134,33 +73,48 @@ export function startDispatch(input: {
   repo: string;
   issueNumber: number;
   title: string;
-}): { ok: true; dispatch: DispatchState } | { ok: false; status: number; error: string } {
+  provider?: string;
+}): { ok: true; dispatch: AgentRun } | { ok: false; status: number; error: string } {
+  const provider = normalizeProviderId(input.provider || "claude-code");
+  if (provider !== "claude-code") {
+    return {
+      ok: false,
+      status: 400,
+      error: `${provider} cannot be auto-dispatched — use the IDE/CLI flow and log the run manually.`,
+    };
+  }
+
+  const project = findProjectByRepo(input.repo);
+  if (project) {
+    const budgetError = overBudgetMessage(project.id, spendSummary().byProject);
+    if (budgetError) {
+      return { ok: false, status: 402, error: budgetError };
+    }
+  }
+
   const id = `${input.repo}#${input.issueNumber}`;
   const existing = dispatches.get(id);
   if (existing?.status === "running") {
     return { ok: false, status: 409, error: "An agent is already running on this task." };
   }
-  const running = runningDispatchCount();
-  if (running >= MAX_CONCURRENT) {
+  if (runningDispatchCount() >= MAX_CONCURRENT) {
     return { ok: false, status: 429, error: `Max ${MAX_CONCURRENT} concurrent agents — wait for one to finish.` };
   }
 
   const workdir = mkdtempSync(join(tmpdir(), "bai-agent-"));
-  const state: DispatchState = {
+  const state: AgentRun = {
     id,
+    provider: "claude-code" as AgentProviderId,
     repo: input.repo,
     issueNumber: input.issueNumber,
     title: input.title,
     status: "running",
     startedAt: new Date().toISOString(),
     outputTail: "",
+    source: "dispatch",
   };
   dispatches.set(id, state);
 
-  // shell:true so `claude` resolves through PATH on Windows (claude.cmd).
-  // The prompt goes through stdin, never argv: cmd.exe would split a
-  // multi-line prompt into separate arguments. --output-format json makes
-  // stdout a single result object with total_cost_usd for spend tracking.
   const child = spawn(
     `claude -p --output-format json --permission-mode acceptEdits --allowedTools "${AGENT_ALLOWED_TOOLS}"`,
     { cwd: workdir, shell: true, windowsHide: true, env: process.env }
@@ -172,16 +126,16 @@ export function startDispatch(input: {
     stdoutBuf = (stdoutBuf + chunk.toString()).slice(-200_000);
   });
   child.stderr?.on("data", (chunk: Buffer) => {
-    state.outputTail = (state.outputTail + chunk.toString()).slice(-MAX_TAIL);
+    state.outputTail = ((state.outputTail || "") + chunk.toString()).slice(-MAX_TAIL);
   });
   child.on("error", (err) => {
     state.status = "failed";
     state.finishedAt = new Date().toISOString();
-    state.outputTail = (state.outputTail + `\nspawn error: ${err.message}`).slice(-MAX_TAIL);
+    state.outputTail = ((state.outputTail || "") + `\nspawn error: ${err.message}`).slice(-MAX_TAIL);
     persistRun(state);
   });
   child.on("close", (code) => {
-    if (state.status !== "running") return; // already failed via 'error'
+    if (state.status !== "running") return;
     try {
       const result = JSON.parse(stdoutBuf.slice(stdoutBuf.indexOf("{"))) as Record<string, unknown>;
       state.costUsd = Number(result.total_cost_usd) || undefined;
@@ -190,7 +144,7 @@ export function startDispatch(input: {
       state.resultSummary = String(result.result || "").slice(0, 400);
       state.status = result.is_error || code !== 0 ? "failed" : "done";
     } catch {
-      state.outputTail = (state.outputTail + stdoutBuf).slice(-MAX_TAIL);
+      state.outputTail = ((state.outputTail || "") + stdoutBuf).slice(-MAX_TAIL);
       state.status = code === 0 ? "done" : "failed";
     }
     state.finishedAt = new Date().toISOString();
