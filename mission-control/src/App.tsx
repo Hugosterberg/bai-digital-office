@@ -181,21 +181,42 @@ const STAGES = [
   { key: "done", label: "Done", tone: "border-zinc-700" },
 ] as const;
 
-function TaskCard({ task }: { task: TaskIssue }) {
+/**
+ * The dispatch command for a ready task: paste into a terminal and a
+ * headless Claude Code agent executes the issue end-to-end (clone →
+ * feat/ branch → verify → PR → labels). The human starts every run —
+ * see server/lib/dispatch.ts for the (dormant) one-click variant.
+ */
+function agentCommand(repo: string, issueNumber: number): string {
+  return `claude -p "Execute GitHub issue #${issueNumber} in ${repo} per the BAI agent contract in its body: read it with gh issue view ${issueNumber} --repo ${repo}, label agent:building, clone, build on a feat/ branch, run the repo's verify scripts until green, push, open a PR with Closes #${issueNumber}, then label agent:review. Never push to main or merge." --permission-mode acceptEdits --allowedTools "Bash(git:*),Bash(gh:*),Bash(npm:*),Bash(npx:*),Bash(node:*),Edit,Write,Read,Glob,Grep"`;
+}
+
+function TaskCard({ task, repo }: { task: TaskIssue; repo: string }) {
+  const [copied, setCopied] = useState(false);
   return (
-    <a
-      href={task.url}
-      target="_blank"
-      rel="noreferrer"
-      className="block rounded-md border border-zinc-800 bg-zinc-900 p-2.5 hover:border-zinc-600 transition-colors"
-    >
-      <p className="text-sm text-zinc-100 leading-snug">{task.title}</p>
-      <p className="mt-1 text-[11px] text-zinc-500">
-        #{task.number}
-        {task.priority ? ` · ${task.priority}` : ""}
-        {task.assignee ? ` · ${task.assignee}` : ""}
-      </p>
-    </a>
+    <div className="rounded-md border border-zinc-800 bg-zinc-900 p-2.5 hover:border-zinc-600 transition-colors">
+      <a href={task.url} target="_blank" rel="noreferrer" className="block">
+        <p className="text-sm text-zinc-100 leading-snug">{task.title}</p>
+        <p className="mt-1 text-[11px] text-zinc-500">
+          #{task.number}
+          {task.priority ? ` · ${task.priority}` : ""}
+          {task.assignee ? ` · ${task.assignee}` : ""}
+        </p>
+      </a>
+      {task.stage === "agent:ready" ? (
+        <button
+          type="button"
+          onClick={() => {
+            void navigator.clipboard.writeText(agentCommand(repo, task.number));
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+          }}
+          className="mt-2 w-full rounded border border-emerald-800 px-2 py-1 text-[11px] text-emerald-400 hover:bg-emerald-950/40 transition-colors"
+        >
+          {copied ? "Copied — paste in a terminal" : "▶ Copy agent command"}
+        </button>
+      ) : null}
+    </div>
   );
 }
 
@@ -273,7 +294,7 @@ function ProjectBoard({ board }: { board: Board }) {
                 {stage.label} <span className="text-zinc-600">{tasks.length}</span>
               </p>
               {tasks.map((task) => (
-                <TaskCard key={task.number} task={task} />
+                <TaskCard key={task.number} task={task} repo={board.project.repo} />
               ))}
               {tasks.length === 0 ? <p className="px-1 pb-1 text-[11px] text-zinc-600">—</p> : null}
             </div>
