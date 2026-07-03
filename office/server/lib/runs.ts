@@ -89,6 +89,7 @@ function projectRow(project: Project, bucket: SpendBucket): ProjectSpendRow {
     domain: project.domain,
     totalUsd: bucket.totalUsd,
     todayUsd: bucket.todayUsd,
+    monthlyUsd: bucket.monthlyUsd,
     runs: bucket.runs,
     avgCostUsd: bucket.runs > 0 ? bucket.totalUsd / bucket.runs : 0,
   };

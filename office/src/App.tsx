@@ -132,7 +132,7 @@ interface SpendSummary {
 const INPUT_CLS =
   "w-full rounded-md border border-bai-line bg-bai-surface px-3 py-2 text-sm text-bai-fg placeholder-bai-mute/70 focus:border-bai-orange focus:outline-none";
 
-const usd = (n: number) => `$${n.toFixed(2)}`;
+const usd = (n: number | undefined | null) => `$${(Number(n) || 0).toFixed(2)}`;
 const mins = (ms: number) => (ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.round(ms / 60_000)}m`);
 
 async function getJson<T>(url: string): Promise<T> {
@@ -635,9 +635,9 @@ function SpendDashboard({ providers }: { providers: AgentProvider[] }) {
         ) : null}
       </div>
 
-      {spend?.insights.topProjectToday || spend?.insights.mostExpensiveIssue ? (
+      {spend?.insights?.topProjectToday || spend?.insights?.mostExpensiveIssue ? (
         <div className="flex flex-wrap gap-2">
-          {spend.insights.topProjectToday ? (
+          {spend?.insights?.topProjectToday ? (
             <div className="rounded-lg border border-bai-orange/30 bg-bai-orange/5 px-3 py-2 text-xs">
               <span className="text-bai-mute">Hottest domain today · </span>
               <span className="font-medium text-bai-fg">
@@ -646,7 +646,7 @@ function SpendDashboard({ providers }: { providers: AgentProvider[] }) {
               <span className="ml-2 tabular-nums text-bai-orange">{usd(spend.insights.topProjectToday.todayUsd)}</span>
             </div>
           ) : null}
-          {spend.insights.mostExpensiveIssue ? (
+          {spend?.insights?.mostExpensiveIssue ? (
             <div className="rounded-lg border border-amber-400/30 bg-amber-400/5 px-3 py-2 text-xs">
               <span className="text-bai-mute">Most invested issue · </span>
               <span className="font-medium text-bai-fg">#{spend.insights.mostExpensiveIssue.issueNumber}</span>
