@@ -20,6 +20,9 @@ dist-ssr
 # Lokalt token-cache (innehåller OAuth-tokens – ska inte committas)
 server/tokens.json
 
+# Lokal agent-körhistorik och spend-logg (operationell data per maskin)
+server/data/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

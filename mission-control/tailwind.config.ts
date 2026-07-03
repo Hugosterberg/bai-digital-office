@@ -14,7 +14,22 @@ export default {
       },
     },
     extend: {
+      fontFamily: {
+        sans: ["Geist", "ui-sans-serif", "system-ui", "sans-serif"],
+        mono: ["Geist Mono", "ui-monospace", "SFMono-Regular", "monospace"],
+      },
       colors: {
+        // bai digital brand palette (baidigital.xyz)
+        bai: {
+          bg: "#050505",
+          surface: "#0e0e10",
+          line: "#2a2723",
+          fg: "#f5f2ea",
+          mute: "#a7a29a",
+          metal: "#d8cec0",
+          orange: "#f7931a",
+          "orange-deep": "#c96d0b",
+        },
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",
         ring: "hsl(var(--ring))",

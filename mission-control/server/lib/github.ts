@@ -107,6 +107,10 @@ export interface ReviewPr {
   branch: string;
   updatedAt: string;
   draft: boolean;
+  /** Head commit SHA — for check status. */
+  headSha?: string;
+  mergeable: boolean | null;
+  merged: boolean;
 }
 
 /** Open PRs — the human review queue. */
@@ -120,6 +124,9 @@ export async function listOpenPrs(repo: string): Promise<ReviewPr[]> {
     branch: String((raw.head as Record<string, unknown> | null)?.ref || ""),
     updatedAt: String(raw.updated_at || ""),
     draft: Boolean(raw.draft),
+    headSha: String((raw.head as Record<string, unknown> | null)?.sha || "") || undefined,
+    mergeable: raw.mergeable == null ? null : Boolean(raw.mergeable),
+    merged: Boolean(raw.merged),
   }));
 }
 
@@ -190,4 +197,98 @@ export async function createTask(
   }
   const created = res.data as Record<string, unknown>;
   return { ok: true, number: Number(created.number), url: String(created.html_url || "") };
+}
+
+export interface PrCheckStatus {
+  state: "pending" | "success" | "failure" | "unknown";
+  total: number;
+  passed: number;
+}
+
+export async function getPullRequestCheckStatus(
+  repo: string,
+  headSha: string
+): Promise<PrCheckStatus> {
+  if (!headSha) return { state: "unknown", total: 0, passed: 0 };
+  const res = await gh(`/repos/${repo}/commits/${headSha}/check-runs?per_page=30`);
+  const runs = (res.data as Record<string, unknown> | null)?.check_runs;
+  if (!Array.isArray(runs) || runs.length === 0) {
+    return { state: "unknown", total: 0, passed: 0 };
+  }
+  let passed = 0;
+  let failed = 0;
+  let pending = 0;
+  for (const run of runs) {
+    const status = String((run as Record<string, unknown>).status || "");
+    const conclusion = String((run as Record<string, unknown>).conclusion || "");
+    if (status !== "completed") pending += 1;
+    else if (conclusion === "success" || conclusion === "skipped" || conclusion === "neutral") passed += 1;
+    else failed += 1;
+  }
+  const total = runs.length;
+  if (pending > 0) return { state: "pending", total, passed };
+  if (failed > 0) return { state: "failure", total, passed };
+  return { state: "success", total, passed };
+}
+
+export interface PullRequestDetail extends ReviewPr {
+  body: string;
+  checks: PrCheckStatus;
+}
+
+export async function getPullRequestDetail(
+  repo: string,
+  number: number
+): Promise<PullRequestDetail | null> {
+  const res = await gh(`/repos/${repo}/pulls/${number}`);
+  if (!res.ok) return null;
+  const raw = res.data as Record<string, unknown>;
+  const headSha = String((raw.head as Record<string, unknown> | null)?.sha || "");
+  const checks = await getPullRequestCheckStatus(repo, headSha);
+  return {
+    number: Number(raw.number),
+    title: String(raw.title || ""),
+    url: String(raw.html_url || ""),
+    branch: String((raw.head as Record<string, unknown> | null)?.ref || ""),
+    updatedAt: String(raw.updated_at || ""),
+    draft: Boolean(raw.draft),
+    headSha: headSha || undefined,
+    mergeable: raw.mergeable == null ? null : Boolean(raw.mergeable),
+    merged: Boolean(raw.merged),
+    body: String(raw.body || ""),
+    checks,
+  };
+}
+
+export async function mergePullRequest(
+  repo: string,
+  number: number
+): Promise<{ ok: true; sha: string } | { ok: false; status: number; message: string }> {
+  const detail = await getPullRequestDetail(repo, number);
+  if (!detail) return { ok: false, status: 404, message: "Pull request not found." };
+  if (detail.merged) return { ok: false, status: 409, message: "Pull request is already merged." };
+  if (detail.draft) return { ok: false, status: 400, message: "Draft PR — mark ready for review first." };
+  if (detail.mergeable === false) {
+    return { ok: false, status: 409, message: "GitHub reports merge conflicts." };
+  }
+  if (detail.checks.state === "pending") {
+    return { ok: false, status: 409, message: "CI checks still running — wait for green before merge." };
+  }
+  if (detail.checks.state === "failure") {
+    return { ok: false, status: 409, message: "CI checks failed — fix before merging to main." };
+  }
+
+  const res = await gh(`/repos/${repo}/pulls/${number}/merge`, {
+    method: "PUT",
+    body: JSON.stringify({
+      merge_method: "squash",
+      commit_title: detail.title,
+    }),
+  });
+  if (!res.ok) {
+    const message = String((res.data as Record<string, unknown> | null)?.message || "Merge failed.");
+    return { ok: false, status: res.status, message };
+  }
+  const merged = res.data as Record<string, unknown>;
+  return { ok: true, sha: String(merged.sha || "") };
 }

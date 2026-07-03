@@ -10,6 +10,8 @@
     "dev": "concurrently \"node --experimental-strip-types server/server.ts\" \"vite\"",
     "dev:client": "vite",
     "dev:server": "node --experimental-strip-types server/server.ts",
+    "start": "node --experimental-strip-types server/server.ts",
+    "worker": "node --experimental-strip-types server/worker.ts",
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",

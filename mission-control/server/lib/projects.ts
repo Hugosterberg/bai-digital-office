@@ -11,6 +11,7 @@ export interface Project {
 }
 
 export const PROJECTS: Project[] = [
+  { id: "mission-control", name: "bai digital office", repo: "Hugosterberg/bai-digital-office", domain: "baidigital.office.com" },
   { id: "automazing", name: "automazing", repo: "Hugosterberg/automazing-flow", domain: "automazing.life" },
   { id: "baidigital-site", name: "baidigital.xyz", repo: "Hugosterberg/bai-digital", domain: "baidigital.xyz" },
   { id: "bitcoinlivet", name: "bitcoinlivet", repo: "Hugosterberg/bitcoinlivet" },

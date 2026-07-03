@@ -13,9 +13,10 @@
  */
 
 import { spawn } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export interface DispatchState {
   id: string;
@@ -27,11 +28,62 @@ export interface DispatchState {
   finishedAt?: string;
   /** Last chunk of agent output — enough to see where it landed. */
   outputTail: string;
+  /** From the run's result JSON (claude -p --output-format json). */
+  costUsd?: number;
+  durationMs?: number;
+  numTurns?: number;
+  resultSummary?: string;
 }
 
 const dispatches = new Map<string, DispatchState>();
 const MAX_TAIL = 4_000;
 const MAX_CONCURRENT = 3;
+
+/** Finished runs persist as JSONL so agent history and spend survive restarts. */
+const RUNS_FILE = join(dirname(fileURLToPath(import.meta.url)), "..", "data", "agent-runs.jsonl");
+
+function readRuns(): DispatchState[] {
+  try {
+    return readFileSync(RUNS_FILE, "utf8")
+      .split("\n")
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line) as DispatchState);
+  } catch {
+    return []; // no history yet
+  }
+}
+
+for (const run of readRuns().slice(-20)) dispatches.set(run.id, run);
+
+function persistRun(state: DispatchState): void {
+  try {
+    mkdirSync(dirname(RUNS_FILE), { recursive: true });
+    appendFileSync(RUNS_FILE, JSON.stringify(state) + "\n");
+  } catch (err) {
+    console.warn("[dispatch] could not persist run:", err);
+  }
+}
+
+export interface SpendSummary {
+  totalUsd: number;
+  todayUsd: number;
+  runs: number;
+}
+
+/** Claude spend across all persisted runs (+ nothing for still-running ones). */
+export function spendSummary(): SpendSummary {
+  const today = new Date().toISOString().slice(0, 10);
+  let totalUsd = 0;
+  let todayUsd = 0;
+  let runs = 0;
+  for (const run of readRuns()) {
+    const cost = Number(run.costUsd) || 0;
+    totalUsd += cost;
+    runs += 1;
+    if (String(run.startedAt).slice(0, 10) === today) todayUsd += cost;
+  }
+  return { totalUsd, todayUsd, runs };
+}
 
 /** Tools the dispatched agent may use without per-call approval. */
 const AGENT_ALLOWED_TOOLS = [
@@ -51,6 +103,14 @@ export function listDispatches(): DispatchState[] {
   return [...dispatches.values()]
     .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
     .slice(0, 20);
+}
+
+export function runningDispatchCount(): number {
+  return [...dispatches.values()].filter((d) => d.status === "running").length;
+}
+
+export function dispatchAvailable(): boolean {
+  return process.env.DISPATCH_DISABLED !== "true";
 }
 
 function agentPrompt(repo: string, issueNumber: number): string {
@@ -80,7 +140,7 @@ export function startDispatch(input: {
   if (existing?.status === "running") {
     return { ok: false, status: 409, error: "An agent is already running on this task." };
   }
-  const running = [...dispatches.values()].filter((d) => d.status === "running").length;
+  const running = runningDispatchCount();
   if (running >= MAX_CONCURRENT) {
     return { ok: false, status: 429, error: `Max ${MAX_CONCURRENT} concurrent agents — wait for one to finish.` };
   }
@@ -98,34 +158,43 @@ export function startDispatch(input: {
   dispatches.set(id, state);
 
   // shell:true so `claude` resolves through PATH on Windows (claude.cmd).
+  // The prompt goes through stdin, never argv: cmd.exe would split a
+  // multi-line prompt into separate arguments. --output-format json makes
+  // stdout a single result object with total_cost_usd for spend tracking.
   const child = spawn(
-    "claude",
-    [
-      "-p",
-      agentPrompt(input.repo, input.issueNumber),
-      "--permission-mode",
-      "acceptEdits",
-      "--allowedTools",
-      AGENT_ALLOWED_TOOLS,
-    ],
+    `claude -p --output-format json --permission-mode acceptEdits --allowedTools "${AGENT_ALLOWED_TOOLS}"`,
     { cwd: workdir, shell: true, windowsHide: true, env: process.env }
   );
+  child.stdin?.end(agentPrompt(input.repo, input.issueNumber));
 
-  const append = (chunk: Buffer) => {
+  let stdoutBuf = "";
+  child.stdout?.on("data", (chunk: Buffer) => {
+    stdoutBuf = (stdoutBuf + chunk.toString()).slice(-200_000);
+  });
+  child.stderr?.on("data", (chunk: Buffer) => {
     state.outputTail = (state.outputTail + chunk.toString()).slice(-MAX_TAIL);
-  };
-  child.stdout?.on("data", append);
-  child.stderr?.on("data", append);
+  });
   child.on("error", (err) => {
     state.status = "failed";
     state.finishedAt = new Date().toISOString();
     state.outputTail = (state.outputTail + `\nspawn error: ${err.message}`).slice(-MAX_TAIL);
+    persistRun(state);
   });
   child.on("close", (code) => {
-    if (state.status === "running") {
+    if (state.status !== "running") return; // already failed via 'error'
+    try {
+      const result = JSON.parse(stdoutBuf.slice(stdoutBuf.indexOf("{"))) as Record<string, unknown>;
+      state.costUsd = Number(result.total_cost_usd) || undefined;
+      state.durationMs = Number(result.duration_ms) || undefined;
+      state.numTurns = Number(result.num_turns) || undefined;
+      state.resultSummary = String(result.result || "").slice(0, 400);
+      state.status = result.is_error || code !== 0 ? "failed" : "done";
+    } catch {
+      state.outputTail = (state.outputTail + stdoutBuf).slice(-MAX_TAIL);
       state.status = code === 0 ? "done" : "failed";
-      state.finishedAt = new Date().toISOString();
     }
+    state.finishedAt = new Date().toISOString();
+    persistRun(state);
   });
 
   return { ok: true, dispatch: state };

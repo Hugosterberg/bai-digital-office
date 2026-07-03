@@ -1,16 +1,37 @@
 /**
- * Mission Control API — a thin layer over GitHub. Issues labeled `agent` are
- * the task queue; PRs are the review queue. No database.
+ * Mission Control API — GitHub Issues = task queue, PRs = review queue.
  *
- *   GET  /api/projects  — the project registry (mirrors PORTFOLIO.md)
- *   GET  /api/board     — tasks by stage + open PRs, per project
- *   POST /api/tasks     — create a task issue from the company template
+ *   GET  /api/projects   — project registry
+ *   GET  /api/board      — kanban + open PRs
+ *   POST /api/tasks      — create task + auto-dispatch agent
+ *   POST /api/dispatch   — dispatch agent on existing agent:ready task
+ *   POST /api/prs/merge  — squash-merge PR → Vercel deploys main
+ *   GET  /api/prs/detail — PR + CI status
+ *   GET  /api/dispatches — agent run history + Claude spend
  */
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { PROJECTS, findProject } from "./lib/projects.ts";
-import { githubConfigured, listTasks, listOpenPrs, createTask } from "./lib/github.ts";
+import {
+  githubConfigured,
+  listTasks,
+  listOpenPrs,
+  createTask,
+  getPullRequestDetail,
+  mergePullRequest,
+} from "./lib/github.ts";
+import {
+  listDispatches,
+  spendSummary,
+  startDispatch,
+  dispatchAvailable,
+  runningDispatchCount,
+} from "./lib/dispatch.ts";
+import { startAgentPoller } from "./lib/agentPoller.ts";
+import { requireWriteAuth } from "./lib/auth.ts";
 
 dotenv.config({ path: [".env.local", ".env"] });
 
@@ -19,11 +40,17 @@ app.use(cors());
 app.use(express.json());
 
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, github: githubConfigured() });
+  res.json({
+    ok: true,
+    github: githubConfigured(),
+    dispatch: dispatchAvailable(),
+    runningAgents: runningDispatchCount(),
+    autoPoll: process.env.AGENT_POLL_ENABLED === "true",
+  });
 });
 
 app.get("/api/projects", (_req, res) => {
-  res.json({ projects: PROJECTS, github: githubConfigured() });
+  res.json({ projects: PROJECTS, github: githubConfigured(), dispatch: dispatchAvailable() });
 });
 
 app.get("/api/board", async (req, res) => {
@@ -49,7 +76,7 @@ app.get("/api/board", async (req, res) => {
   }
 });
 
-app.post("/api/tasks", async (req, res) => {
+app.post("/api/tasks", requireWriteAuth, async (req, res) => {
   if (!githubConfigured()) {
     return res.status(503).json({ error: "GITHUB_TOKEN is not set — add it to .env.local." });
   }
@@ -61,7 +88,7 @@ app.post("/api/tasks", async (req, res) => {
   if (!project) return res.status(400).json({ error: "Unknown project." });
   if (!title) return res.status(400).json({ error: "Title is required." });
   if (criteria.length === 0) {
-    return res.status(400).json({ error: "At least one done-criterion is required — agents are graded against them." });
+    return res.status(400).json({ error: "At least one done-criterion is required." });
   }
 
   const priorityRaw = String(req.body?.priority || "medium");
@@ -76,8 +103,109 @@ app.post("/api/tasks", async (req, res) => {
   if (result.ok === false) {
     return res.status(result.status === 404 ? 404 : 502).json({ error: result.message });
   }
-  res.json(result);
+
+  const autoDispatch = req.body?.autoDispatch !== false && dispatchAvailable();
+  let agent: unknown = { skipped: "dispatch disabled on this host" };
+  if (autoDispatch) {
+    const dispatch = startDispatch({ repo: project.repo, issueNumber: result.number, title });
+    agent = dispatch.ok ? dispatch.dispatch : { error: dispatch.error };
+  }
+  res.json({ ...result, agent });
 });
 
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log(`mission-control api on :${PORT}`));
+/** Dispatch a Claude Code agent on an existing agent:ready issue. */
+app.post("/api/dispatch", requireWriteAuth, async (req, res) => {
+  if (!dispatchAvailable()) {
+    return res.status(503).json({
+      error: "Agent dispatch is disabled on this host. Run the API locally or `npm run worker` with Claude Code logged in.",
+    });
+  }
+  const project = findProject(String(req.body?.project || ""));
+  const issueNumber = Number(req.body?.issueNumber);
+  const title = String(req.body?.title || "").trim();
+  if (!project) return res.status(400).json({ error: "Unknown project." });
+  if (!Number.isInteger(issueNumber) || issueNumber < 1) {
+    return res.status(400).json({ error: "issueNumber is required." });
+  }
+
+  const tasks = await listTasks(project.repo);
+  const task = tasks.find((t) => t.number === issueNumber);
+  if (!task) return res.status(404).json({ error: "Issue not found." });
+  if (task.stage !== "agent:ready") {
+    return res.status(409).json({ error: `Task is ${task.stage}, not agent:ready.` });
+  }
+
+  const dispatch = startDispatch({
+    repo: project.repo,
+    issueNumber,
+    title: title || task.title,
+  });
+  if (!dispatch.ok) {
+    return res.status(dispatch.status).json({ error: dispatch.error });
+  }
+  res.json({ ok: true, dispatch: dispatch.dispatch });
+});
+
+app.get("/api/prs/detail", async (req, res) => {
+  if (!githubConfigured()) {
+    return res.status(503).json({ error: "GITHUB_TOKEN is not set." });
+  }
+  const repo = String(req.query.repo || "").trim();
+  const number = Number(req.query.number);
+  if (!repo || !Number.isInteger(number)) {
+    return res.status(400).json({ error: "repo and number query params required." });
+  }
+  const detail = await getPullRequestDetail(repo, number);
+  if (!detail) return res.status(404).json({ error: "Pull request not found." });
+  res.json({ pr: detail });
+});
+
+/** Approve + ship: squash-merge to main. Vercel deploys prod on push to main. */
+app.post("/api/prs/merge", requireWriteAuth, async (req, res) => {
+  if (!githubConfigured()) {
+    return res.status(503).json({ error: "GITHUB_TOKEN is not set." });
+  }
+  const repo = String(req.body?.repo || "").trim();
+  const number = Number(req.body?.number);
+  if (!repo || !Number.isInteger(number)) {
+    return res.status(400).json({ error: "repo and number are required." });
+  }
+  const project = PROJECTS.find((p) => p.repo === repo);
+  if (!project) {
+    return res.status(400).json({ error: "Unknown repo — not in portfolio." });
+  }
+
+  const result = await mergePullRequest(repo, number);
+  if (!result.ok) {
+    return res.status(result.status).json({ error: result.message });
+  }
+  res.json({
+    ok: true,
+    sha: result.sha,
+    message: "Merged to main — Vercel will deploy production when the repo is linked.",
+    domain: project.domain ?? null,
+  });
+});
+
+app.get("/api/dispatches", (_req, res) => {
+  res.json({ dispatches: listDispatches(), spend: spendSummary() });
+});
+
+/** Production: serve the Vite build. */
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const distDir = join(__dirname, "..", "dist");
+app.use(express.static(distDir));
+app.get(/^(?!\/api).*/, (_req, res) => {
+  res.sendFile(join(distDir, "index.html"), (err) => {
+    if (err) res.status(404).send("Run npm run build first.");
+  });
+});
+
+export default app;
+
+const isDirectRun = process.argv[1]?.replace(/\\/g, "/").endsWith("server/server.ts");
+if (isDirectRun) {
+  startAgentPoller(Number(process.env.AGENT_POLL_INTERVAL_MS) || 90_000);
+  const PORT = process.env.PORT || 3001;
+  app.listen(PORT, () => console.log(`bai digital office api on :${PORT}`));
+}
