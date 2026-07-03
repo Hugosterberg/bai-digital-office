@@ -17,7 +17,7 @@ _One row per project. Status: idea / building / live / parked. Last updated: 202
 | **pump** | building | [Hugosterberg/pump](https://github.com/Hugosterberg/pump) | `c:\Code\pump` | — | Portal/site | "Portable Utilities Made Perfect" — product brand. |
 | **pump-shopify** | building | [Hugosterberg/pump-shopify](https://github.com/Hugosterberg/pump-shopify) | `c:\Code\pump-shopify` | — | Shopify theme (Liquid) | Pump's storefront theme. |
 | **los-tios** | parked | [Hugosterberg/los-tios](https://github.com/Hugosterberg/los-tios) | `c:\Code\los-tios` | — | Vite + React | Los Tios. |
-| **bai digital office** | building | [Hugosterberg/bai-digital-office](https://github.com/Hugosterberg/bai-digital-office) (`office/`) | `c:\Code\bai-digital-office\office` | [baidigital.office.xyz](https://baidigital.office.xyz) | React + Express over GitHub API | Agent cockpit: task queue = GitHub Issues, review board = PRs. |
+| **bai digital office** | building | [Hugosterberg/bai-digital-office](https://github.com/Hugosterberg/bai-digital-office) (`office/`) | `c:\Code\bai-digital-office\office` | [office.baidigital.xyz](https://office.baidigital.xyz) | React + Express over GitHub API | Agent cockpit: task queue = GitHub Issues, review board = PRs. |
 | **bai-repo-engineer** (CMA agent) | live | agent folder `c:\Code\launch-your-agent\my-agent` | see left | — | Anthropic CMA (workspace `automazing`) | First AI employee; rubric-graded. |
 | **invest** | idea | `bai-digital-office/invest` (from template-webapp) | — | — | TBD | Investment leg; LunarCrush/Quartr MCP. |
 

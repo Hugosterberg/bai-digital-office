@@ -1,6 +1,6 @@
 # bai digital office
 
-The agent cockpit at [baidigital.office.xyz](https://baidigital.office.xyz) —
+The agent cockpit at [office.baidigital.xyz](https://office.baidigital.xyz) —
 styled after [baidigital.xyz](https://baidigital.xyz) (near-black `#050505`, warm off-white
 `#f5f2ea`, orange accent `#f7931a`, Geist type — see the `bai` palette in
 `tailwind.config.ts`).
@@ -19,7 +19,7 @@ queue, PRs are the review surface.
 Vercel cannot run agents (no Claude CLI, no background process). The worker runs 24/7 in the cloud.
 
 ```
-You → baidigital.office.xyz → GitHub issue (agent:ready)
+You → office.baidigital.xyz → GitHub issue (agent:ready)
                                     ↓
               Railway worker → claude -p → PR → you approve in office
 ```
@@ -38,7 +38,7 @@ You → baidigital.office.xyz → GitHub issue (agent:ready)
 | `WORKER_WEBHOOK_URL` | `https://<your-worker>.up.railway.app/poll` |
 | `WORKER_SECRET` | Same secret as on Railway worker |
 
-3. DNS → `baidigital.office.xyz`
+3. DNS → `office.baidigital.xyz`
 
 ## Deploy Railway (agents)
 
@@ -69,7 +69,7 @@ curl https://YOUR-WORKER.up.railway.app/health
 # → {"ok":true,"service":"bai-agent-worker"}
 ```
 
-Create a task on baidigital.office.xyz — within seconds the worker should pick it up (webhook) or within 90s (poll).
+Create a task on office.baidigital.xyz — within seconds the worker should pick it up (webhook) or within 90s (poll).
 
 ## Run locally (development)
 
