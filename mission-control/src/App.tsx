@@ -45,9 +45,19 @@ async function getJson<T>(url: string): Promise<T> {
 
 /* ── new task form ───────────────────────────────────────────── */
 
-function NewTaskForm({ projects }: { projects: Project[] }) {
+function NewTaskForm({
+  projects,
+  selectedProject,
+  onProjectChange,
+}: {
+  projects: Project[];
+  /** Controlled from the shell so "+ first task" on a quiet project preselects it. */
+  selectedProject: string | null;
+  onProjectChange: (id: string) => void;
+}) {
   const qc = useQueryClient();
-  const [project, setProject] = useState(projects[0]?.id ?? "");
+  const project = selectedProject ?? projects[0]?.id ?? "";
+  const setProject = onProjectChange;
   const [title, setTitle] = useState("");
   const [context, setContext] = useState("");
   const [steps, setSteps] = useState("");
@@ -189,6 +199,34 @@ function TaskCard({ task }: { task: TaskIssue }) {
   );
 }
 
+function isQuiet(board: Board): boolean {
+  return board.tasks.length === 0 && board.prs.length === 0;
+}
+
+/** One slim row for a project with no agent activity — no empty-column noise. */
+function QuietProjectRow({ board, onNewTask }: { board: Board; onNewTask: (id: string) => void }) {
+  return (
+    <div className="flex items-center gap-3 rounded-md border border-zinc-800/70 bg-zinc-900/40 px-3 py-2">
+      <span className="text-sm font-medium text-zinc-300">{board.project.name}</span>
+      <a
+        className="text-[11px] text-zinc-600 hover:text-zinc-400"
+        href={`https://github.com/${board.project.repo}`}
+        target="_blank"
+        rel="noreferrer"
+      >
+        {board.project.repo}
+      </a>
+      <button
+        type="button"
+        onClick={() => onNewTask(board.project.id)}
+        className="ml-auto rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-400 hover:border-emerald-600 hover:text-emerald-400 transition-colors"
+      >
+        + first task
+      </button>
+    </div>
+  );
+}
+
 function ProjectBoard({ board }: { board: Board }) {
   return (
     <section className="space-y-3">
@@ -249,6 +287,7 @@ function ProjectBoard({ board }: { board: Board }) {
 /* ── shell ───────────────────────────────────────────────────── */
 
 function MissionControl() {
+  const [formProject, setFormProject] = useState<string | null>(null);
   const projectsQuery = useQuery({
     queryKey: ["projects"],
     queryFn: () => getJson<{ projects: Project[]; github: boolean }>("/api/projects"),
@@ -260,22 +299,53 @@ function MissionControl() {
     enabled: Boolean(projectsQuery.data?.github),
   });
 
+  const boards = boardQuery.data?.boards ?? [];
+  const activeBoards = boards.filter((b) => !isQuiet(b));
+  const quietBoards = boards.filter(isQuiet);
+  const totals = boards.reduce(
+    (acc, b) => {
+      for (const t of b.tasks) {
+        if (t.stage === "agent:ready") acc.ready += 1;
+        else if (t.stage === "agent:building") acc.building += 1;
+        else if (t.stage === "agent:review") acc.review += 1;
+      }
+      acc.prs += b.prs.length;
+      return acc;
+    },
+    { ready: 0, building: 0, review: 0, prs: 0 }
+  );
+
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
-      <header className="border-b border-zinc-800 px-6 py-4">
-        <h1 className="text-xl font-bold">
-          BAI <span className="text-emerald-500">Mission Control</span>
-        </h1>
-        <p className="text-xs text-zinc-500">
-          Write a well-described task → it becomes an <code>agent:ready</code> issue → an agent builds it →
-          you review the PR.
-        </p>
+      <header className="flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-zinc-800 px-6 py-4">
+        <div>
+          <h1 className="text-xl font-bold">
+            BAI <span className="text-emerald-500">Mission Control</span>
+          </h1>
+          <p className="text-xs text-zinc-500">
+            Write a well-described task → it becomes an <code>agent:ready</code> issue → an agent builds it →
+            you review the PR.
+          </p>
+        </div>
+        {boards.length > 0 ? (
+          <div className="ml-auto flex items-center gap-4 text-xs tabular-nums">
+            <span className="text-emerald-400">{totals.ready} ready</span>
+            <span className="text-amber-400">{totals.building} building</span>
+            <span className={totals.prs > 0 ? "rounded-full bg-blue-600 px-2.5 py-1 font-semibold text-white" : "text-zinc-500"}>
+              {totals.prs} awaiting review
+            </span>
+          </div>
+        ) : null}
       </header>
-      <main className="mx-auto grid max-w-7xl grid-cols-1 gap-8 p-6 lg:grid-cols-[340px_1fr]">
-        <aside>
+      <main className="mx-auto grid max-w-7xl grid-cols-1 items-start gap-8 p-6 lg:grid-cols-[340px_1fr]">
+        <aside className="lg:sticky lg:top-6">
           {projectsQuery.data ? (
             projectsQuery.data.github ? (
-              <NewTaskForm projects={projectsQuery.data.projects} />
+              <NewTaskForm
+                projects={projectsQuery.data.projects}
+                selectedProject={formProject}
+                onProjectChange={setFormProject}
+              />
             ) : (
               <p className="text-sm text-amber-400">
                 Set <code>GITHUB_TOKEN</code> in <code>.env.local</code> (repo scope) and restart the server.
@@ -290,9 +360,19 @@ function MissionControl() {
           {boardQuery.isError ? (
             <p className="text-sm text-red-400">{(boardQuery.error as Error).message}</p>
           ) : null}
-          {boardQuery.data?.boards.map((board) => (
+          {activeBoards.map((board) => (
             <ProjectBoard key={board.project.id} board={board} />
           ))}
+          {quietBoards.length > 0 ? (
+            <section className="space-y-2">
+              <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
+                Quiet projects — no agent activity yet
+              </h2>
+              {quietBoards.map((board) => (
+                <QuietProjectRow key={board.project.id} board={board} onNewTask={setFormProject} />
+              ))}
+            </section>
+          ) : null}
         </div>
       </main>
     </div>
