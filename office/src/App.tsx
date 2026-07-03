@@ -1,8 +1,19 @@
 import { QueryClient, QueryClientProvider, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 
 const queryClient = new QueryClient();
 const PROVIDER_KEY = "bai-office-agent-provider";
+const TAB_KEY = "bai-office-tab";
+
+type OfficeTab = "dashboard" | "projects" | "new-task" | "spend" | "settings";
+
+const TAB_META: Record<OfficeTab, { label: string; hint: string }> = {
+  dashboard: { label: "Dashboard", hint: "What needs you right now — PRs to approve and tasks ready for agents." },
+  projects: { label: "Projects", hint: "Pick a product, review its kanban, and merge PRs to production." },
+  "new-task": { label: "Create", hint: "Describe the work — it becomes a GitHub issue for agents to pick up." },
+  spend: { label: "Spend", hint: "Track agent cost by project, provider, and issue." },
+  settings: { label: "Settings", hint: "Choose your default agent, log manual runs, and set budget caps." },
+};
 
 /* ── types ──────────────────────────────────────────────────── */
 
@@ -134,6 +145,69 @@ const INPUT_CLS =
 
 const usd = (n: number | undefined | null) => `$${(Number(n) || 0).toFixed(2)}`;
 const mins = (ms: number) => (ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.round(ms / 60_000)}m`);
+
+function PageHeader({ title, description }: { title: string; description?: string }) {
+  return (
+    <header className="mb-6">
+      <h2 className="text-lg font-semibold tracking-tight text-bai-fg">{title}</h2>
+      {description ? <p className="mt-1 max-w-2xl text-sm text-bai-mute">{description}</p> : null}
+    </header>
+  );
+}
+
+function WorkflowStrip() {
+  const steps = [
+    { label: "Create task", sub: "GitHub issue" },
+    { label: "Agent builds", sub: "PR on feat/" },
+    { label: "You review", sub: "CI + diff" },
+    { label: "Approve", sub: "Ships to prod" },
+  ];
+  return (
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-bai-line/70 bg-bai-surface/25 px-3 py-2.5 text-[11px] text-bai-mute">
+      {steps.map((step, i) => (
+        <Fragment key={step.label}>
+          {i > 0 ? <span className="hidden text-bai-line sm:inline">→</span> : null}
+          <span>
+            <span className="font-medium text-bai-metal">{step.label}</span>
+            <span className="text-bai-mute/80"> · {step.sub}</span>
+          </span>
+        </Fragment>
+      ))}
+    </div>
+  );
+}
+
+function StatCard({
+  label,
+  value,
+  tone = "default",
+}: {
+  label: string;
+  value: string | number;
+  tone?: "default" | "accent" | "warn";
+}) {
+  const styles =
+    tone === "accent"
+      ? "border-bai-orange/40 bg-bai-orange/10 text-bai-orange"
+      : tone === "warn"
+        ? "border-amber-400/30 bg-amber-400/5 text-amber-300"
+        : "border-bai-line bg-bai-surface/30 text-bai-fg";
+  return (
+    <div className={`rounded-lg border px-3 py-2.5 ${styles}`}>
+      <p className="text-[10px] font-medium uppercase tracking-wider opacity-80">{label}</p>
+      <p className="mt-1 text-xl font-semibold tabular-nums">{value}</p>
+    </div>
+  );
+}
+
+function LoadingBlock({ label = "Loading…" }: { label?: string }) {
+  return (
+    <div className="flex items-center gap-3 rounded-lg border border-bai-line/70 bg-bai-surface/20 px-4 py-8 text-sm text-bai-mute">
+      <span className="h-4 w-4 animate-pulse rounded-full bg-bai-orange/40" />
+      {label}
+    </div>
+  );
+}
 
 async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url);
@@ -280,9 +354,17 @@ function ProjectBudgetCard({ budget, compact }: { budget: ProjectBudgetStatus; c
   );
 }
 
-function ProjectBudgetsEditor({ budgets }: { budgets: ProjectBudgetStatus[] }) {
+function ProjectBudgetsEditor({
+  budgets,
+  defaultOpen = false,
+  embedded = false,
+}: {
+  budgets: ProjectBudgetStatus[];
+  defaultOpen?: boolean;
+  embedded?: boolean;
+}) {
   const qc = useQueryClient();
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(embedded || defaultOpen);
   const [drafts, setDrafts] = useState<Record<string, { daily: string; monthly: string; total: string }>>({});
 
   const getDraft = (b: ProjectBudgetStatus) =>
@@ -316,22 +398,14 @@ function ProjectBudgetsEditor({ budgets }: { budgets: ProjectBudgetStatus[] }) {
 
   if (budgets.length === 0) return null;
 
-  return (
-    <section className="mt-6">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center justify-between rounded-lg border border-bai-line bg-bai-surface/40 px-3 py-2 text-left text-sm hover:border-bai-mute/50"
-      >
-        <span className="font-medium text-bai-fg/90">Project budgets</span>
-        <span className="text-xs text-bai-mute">{open ? "−" : "+"}</span>
-      </button>
-      {open ? (
-        <div className="mt-2 max-h-80 space-y-3 overflow-y-auto rounded-lg border border-bai-line bg-bai-surface/20 p-2">
-          <p className="px-1 text-[11px] leading-relaxed text-bai-mute">
-            Set USD caps per project. Auto-dispatch blocks when any limit is hit. Leave blank for no cap.
-          </p>
-          {budgets.map((b) => {
+  const editor = (
+    <div className={`space-y-3 ${embedded ? "" : "mt-2 max-h-80 overflow-y-auto rounded-lg border border-bai-line bg-bai-surface/20 p-2"}`}>
+      {!embedded ? (
+        <p className="px-1 text-[11px] leading-relaxed text-bai-mute">
+          Set USD caps per project. Auto-dispatch blocks when any limit is hit. Leave blank for no cap.
+        </p>
+      ) : null}
+      {budgets.map((b) => {
             const d = getDraft(b);
             return (
               <div key={b.projectId} className="rounded-lg border border-bai-line/70 bg-bai-bg/30 p-2.5 space-y-2">
@@ -368,8 +442,22 @@ function ProjectBudgetsEditor({ budgets }: { budgets: ProjectBudgetStatus[] }) {
             );
           })}
           {save.isError ? <p className="text-xs text-red-400">{(save.error as Error).message}</p> : null}
-        </div>
-      ) : null}
+    </div>
+  );
+
+  if (embedded) return <section id="project-budgets">{editor}</section>;
+
+  return (
+    <section>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between rounded-lg border border-bai-line bg-bai-surface/40 px-3 py-2 text-left text-sm hover:border-bai-mute/50"
+      >
+        <span className="font-medium text-bai-fg/90">Project budgets</span>
+        <span className="text-xs text-bai-mute">{open ? "−" : "+"}</span>
+      </button>
+      {open ? editor : null}
     </section>
   );
 }
@@ -406,9 +494,11 @@ function copyText(text: string, setCopied: (v: boolean) => void): void {
 function AgentFleetPanel({
   selected,
   onSelect,
+  showHeader = true,
 }: {
   selected: AgentProviderId;
   onSelect: (id: AgentProviderId) => void;
+  showHeader?: boolean;
 }) {
   const query = useQuery({
     queryKey: ["agents"],
@@ -417,13 +507,15 @@ function AgentFleetPanel({
   const providers = query.data?.providers ?? [];
 
   return (
-    <section className="mt-6 space-y-2">
-      <div>
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-bai-mute">Agent fleet</h2>
-        <p className="mt-1 text-[11px] leading-relaxed text-bai-mute/80">
-          Pick how work runs. Only Claude Code headless dispatches from here — log other runs for cost tracking.
-        </p>
-      </div>
+    <section className="space-y-2">
+      {showHeader ? (
+        <div>
+          <h2 className="text-sm font-semibold uppercase tracking-wider text-bai-mute">Agent fleet</h2>
+          <p className="mt-1 text-[11px] leading-relaxed text-bai-mute/80">
+            Pick how work runs. Only Claude Code headless dispatches from here — log other runs for cost tracking.
+          </p>
+        </div>
+      ) : null}
       <div className="space-y-2">
         {providers.map((p) => {
           const active = selected === p.id;
@@ -471,13 +563,17 @@ function LogRunForm({
   projects,
   prefill,
   onLogged,
+  defaultOpen = false,
+  embedded = false,
 }: {
   projects: Project[];
   prefill?: { projectId: string; issueNumber: number; title: string; provider: AgentProviderId } | null;
   onLogged?: () => void;
+  defaultOpen?: boolean;
+  embedded?: boolean;
 }) {
   const qc = useQueryClient();
-  const [open, setOpen] = useState(Boolean(prefill));
+  const [open, setOpen] = useState(embedded || defaultOpen || Boolean(prefill));
   const [project, setProject] = useState(prefill?.projectId ?? projects[0]?.id ?? "");
   const [issueNumber, setIssueNumber] = useState(prefill?.issueNumber ? String(prefill.issueNumber) : "");
   const [title, setTitle] = useState(prefill?.title ?? "");
@@ -525,8 +621,91 @@ function LogRunForm({
 
   if (projects.length === 0) return null;
 
+  const form = (
+    <form
+      id="log-run-form"
+      className={`space-y-3 rounded-lg border border-bai-line bg-bai-surface/30 p-4 ${embedded ? "" : "mt-2"}`}
+      onSubmit={(e) => {
+        e.preventDefault();
+        log.mutate();
+      }}
+    >
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="space-y-1 text-xs text-bai-mute">
+          Agent
+          <select value={provider} onChange={(e) => setProvider(e.target.value as AgentProviderId)} className={INPUT_CLS}>
+            <option value="cursor">Cursor</option>
+            <option value="claude-interactive">Claude terminal</option>
+            <option value="anthropic-api">Anthropic API</option>
+            <option value="claude-code">Claude Code headless</option>
+          </select>
+        </label>
+        <label className="space-y-1 text-xs text-bai-mute">
+          Project
+          <select value={project} onChange={(e) => setProject(e.target.value)} className={INPUT_CLS}>
+            {projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="space-y-1 text-xs text-bai-mute">
+          Issue #
+          <input
+            className={INPUT_CLS}
+            placeholder="e.g. 42"
+            value={issueNumber}
+            onChange={(e) => setIssueNumber(e.target.value)}
+          />
+        </label>
+        <label className="space-y-1 text-xs text-bai-mute">
+          Title
+          <input className={INPUT_CLS} placeholder="What the agent did" value={title} onChange={(e) => setTitle(e.target.value)} />
+        </label>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="space-y-1 text-xs text-bai-mute">
+          Cost (USD)
+          <input
+            className={INPUT_CLS}
+            placeholder="Optional"
+            value={costUsd}
+            onChange={(e) => setCostUsd(e.target.value)}
+          />
+        </label>
+        <label className="space-y-1 text-xs text-bai-mute">
+          Duration (minutes)
+          <input
+            className={INPUT_CLS}
+            placeholder="Optional"
+            value={durationMin}
+            onChange={(e) => setDurationMin(e.target.value)}
+          />
+        </label>
+      </div>
+      <label className="block space-y-1 text-xs text-bai-mute">
+        Notes
+        <input className={INPUT_CLS} placeholder="Optional" value={notes} onChange={(e) => setNotes(e.target.value)} />
+      </label>
+      <button
+        type="submit"
+        disabled={log.isPending || !title.trim() || !issueNumber.trim()}
+        className="w-full rounded-md bg-bai-surface border border-bai-line px-3 py-2 text-sm text-bai-fg hover:border-bai-orange disabled:opacity-50"
+      >
+        {log.isPending ? "Saving…" : "Save run"}
+      </button>
+      {log.isError ? <p className="text-xs text-red-400">{(log.error as Error).message}</p> : null}
+      {log.isSuccess ? <p className="text-xs text-emerald-400">Run logged — spend updated.</p> : null}
+    </form>
+  );
+
+  if (embedded) return <section>{form}</section>;
+
   return (
-    <section className="mt-6">
+    <section>
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -535,60 +714,7 @@ function LogRunForm({
         <span className="font-medium text-bai-fg/90">Log agent run & cost</span>
         <span className="text-xs">{open ? "−" : "+"}</span>
       </button>
-      {open ? (
-        <form
-          className="mt-2 space-y-2 rounded-lg border border-bai-line bg-bai-surface/30 p-3"
-          onSubmit={(e) => {
-            e.preventDefault();
-            log.mutate();
-          }}
-        >
-          <select value={provider} onChange={(e) => setProvider(e.target.value as AgentProviderId)} className={INPUT_CLS}>
-            <option value="cursor">Cursor</option>
-            <option value="claude-interactive">Claude terminal</option>
-            <option value="anthropic-api">Anthropic API</option>
-            <option value="claude-code">Claude Code headless</option>
-          </select>
-          <select value={project} onChange={(e) => setProject(e.target.value)} className={INPUT_CLS}>
-            {projects.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-          <input
-            className={INPUT_CLS}
-            placeholder="Issue #"
-            value={issueNumber}
-            onChange={(e) => setIssueNumber(e.target.value)}
-          />
-          <input className={INPUT_CLS} placeholder="Title" value={title} onChange={(e) => setTitle(e.target.value)} />
-          <div className="grid grid-cols-2 gap-2">
-            <input
-              className={INPUT_CLS}
-              placeholder="Cost USD (optional)"
-              value={costUsd}
-              onChange={(e) => setCostUsd(e.target.value)}
-            />
-            <input
-              className={INPUT_CLS}
-              placeholder="Minutes (optional)"
-              value={durationMin}
-              onChange={(e) => setDurationMin(e.target.value)}
-            />
-          </div>
-          <input className={INPUT_CLS} placeholder="Notes (optional)" value={notes} onChange={(e) => setNotes(e.target.value)} />
-          <button
-            type="submit"
-            disabled={log.isPending || !title.trim() || !issueNumber.trim()}
-            className="w-full rounded-md bg-bai-surface border border-bai-line px-3 py-2 text-sm text-bai-fg hover:border-bai-orange disabled:opacity-50"
-          >
-            {log.isPending ? "Saving…" : "Save run"}
-          </button>
-          {log.isError ? <p className="text-xs text-red-400">{(log.error as Error).message}</p> : null}
-          {log.isSuccess ? <p className="text-xs text-emerald-400">Run logged — spend updated.</p> : null}
-        </form>
-      ) : null}
+      {open ? form : null}
     </section>
   );
 }
@@ -605,7 +731,16 @@ function SpendDashboard({ providers }: { providers: AgentProvider[] }) {
   const dispatches = query.data?.dispatches ?? [];
   const providerMap = Object.fromEntries(providers.map((p) => [p.id, p])) as Record<AgentProviderId, AgentProvider>;
 
-  if (!spend?.runs && dispatches.length === 0) return null;
+  if (!spend?.runs && dispatches.length === 0) {
+    return (
+      <section className="mx-auto max-w-4xl rounded-xl border border-bai-line/80 bg-bai-surface/20 px-6 py-12 text-center">
+        <h2 className="text-base font-semibold text-bai-fg">No agent spend yet</h2>
+        <p className="mt-2 text-sm text-bai-mute">
+          Runs from auto-dispatch or manual logging will appear here with per-project breakdown.
+        </p>
+      </section>
+    );
+  }
 
   const dot: Record<AgentRun["status"], string> = {
     running: "bg-bai-orange animate-pulse",
@@ -617,23 +752,17 @@ function SpendDashboard({ providers }: { providers: AgentProvider[] }) {
   const allProjects = spend?.budgets ?? [];
 
   return (
-    <section className="space-y-5">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h2 className="text-sm font-semibold uppercase tracking-wider text-bai-mute">Spend & activity</h2>
-          <p className="mt-1 text-xs text-bai-mute">
-            Per project with budget limits — see where spend goes and what is left
-          </p>
+    <section className="mx-auto max-w-6xl space-y-5">
+      {spend ? (
+        <div className="flex flex-wrap items-center justify-end gap-2 text-sm tabular-nums">
+          <span className="rounded-full border border-bai-orange/30 bg-bai-orange/10 px-3 py-1 text-bai-orange">
+            {usd(spend.todayUsd)} today
+          </span>
+          <span className="rounded-full border border-bai-line px-3 py-1 text-bai-mute">
+            {usd(spend.totalUsd)} total · {spend.runs} runs
+          </span>
         </div>
-        {spend ? (
-          <div className="text-right text-sm tabular-nums">
-            <span className="text-bai-orange font-semibold">{usd(spend.todayUsd)}</span>
-            <span className="text-bai-mute"> today · </span>
-            <span className="text-bai-fg font-semibold">{usd(spend.totalUsd)}</span>
-            <span className="text-bai-mute"> total · {spend.runs} runs</span>
-          </div>
-        ) : null}
-      </div>
+      ) : null}
 
       {spend?.insights?.topProjectToday || spend?.insights?.mostExpensiveIssue ? (
         <div className="flex flex-wrap gap-2">
@@ -696,7 +825,7 @@ function SpendDashboard({ providers }: { providers: AgentProvider[] }) {
                   {b.hasLimits ? (
                     <ProjectBudgetCard budget={b} compact />
                   ) : (
-                    <p className="text-[10px] text-bai-mute/60">No budget set — open Project budgets in sidebar to add limits.</p>
+                    <p className="text-[10px] text-bai-mute/60">No budget set — add limits in Settings.</p>
                   )}
                   {!b.hasLimits && pSpend && pSpend.totalUsd > 0 ? (
                     <div className="mt-2 flex items-center gap-2">
@@ -778,10 +907,14 @@ function NewTaskForm({
   projects,
   selectedProject,
   onProjectChange,
+  showTitle = true,
+  onCreated,
 }: {
   projects: Project[];
   selectedProject: string | null;
   onProjectChange: (id: string) => void;
+  showTitle?: boolean;
+  onCreated?: (result: { number: number; url: string; projectId: string }) => void;
 }) {
   const qc = useQueryClient();
   const project = selectedProject ?? projects[0]?.id ?? "";
@@ -810,60 +943,77 @@ function NewTaskForm({
       if (!res.ok) throw new Error((data as { error?: string }).error || "Could not create the task");
       return data as { number: number; url: string };
     },
-    onSuccess: () => {
+    onSuccess: (data) => {
       setTitle("");
       setContext("");
       setSteps("");
       setCriteria("");
       void qc.invalidateQueries({ queryKey: ["board"] });
+      onCreated?.({ number: data.number, url: data.url, projectId: project });
     },
   });
 
   return (
     <form
-      className="space-y-3 rounded-xl border border-bai-line bg-bai-surface/30 p-4"
+      className="space-y-4 rounded-xl border border-bai-line bg-bai-surface/30 p-5"
       onSubmit={(e) => {
         e.preventDefault();
         create.mutate();
       }}
     >
-      <h2 className="text-sm font-semibold uppercase tracking-wider text-bai-mute">New task</h2>
-      <select value={project} onChange={(e) => setProject(e.target.value)} className={INPUT_CLS}>
-        {projects.map((p) => (
-          <option key={p.id} value={p.id}>
-            {p.name}
-            {p.domain ? ` → ${p.domain}` : " (internal)"}
-          </option>
-        ))}
-      </select>
-      <input
-        className={INPUT_CLS}
-        placeholder="Title — what the feature does, one line"
-        value={title}
-        onChange={(e) => setTitle(e.target.value)}
-      />
-      <textarea
-        className={INPUT_CLS}
-        rows={3}
-        placeholder="Context — where this lives in the product, patterns/files to reuse"
-        value={context}
-        onChange={(e) => setContext(e.target.value)}
-      />
-      <textarea
-        className={INPUT_CLS}
-        rows={3}
-        placeholder={"Build steps (one per line)\n1 data · 2 API · 3 UI"}
-        value={steps}
-        onChange={(e) => setSteps(e.target.value)}
-      />
-      <textarea
-        className={INPUT_CLS}
-        rows={3}
-        placeholder={"Done when… (one criterion per line — agents are graded on these)"}
-        value={criteria}
-        onChange={(e) => setCriteria(e.target.value)}
-      />
-      <div className="flex items-center gap-2">
+      {showTitle ? <h3 className="text-sm font-semibold uppercase tracking-wider text-bai-mute">Task details</h3> : null}
+      <label className="block space-y-1 text-xs text-bai-mute">
+        Project
+        <select value={project} onChange={(e) => setProject(e.target.value)} className={INPUT_CLS}>
+          {projects.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name}
+              {p.domain ? ` → ${p.domain}` : " (internal)"}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="block space-y-1 text-xs text-bai-mute">
+        Title
+        <input
+          className={INPUT_CLS}
+          placeholder="What the feature does — one clear line"
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+        />
+      </label>
+      <label className="block space-y-1 text-xs text-bai-mute">
+        Context
+        <textarea
+          className={INPUT_CLS}
+          rows={3}
+          placeholder="Where this lives in the product, patterns and files to reuse"
+          value={context}
+          onChange={(e) => setContext(e.target.value)}
+        />
+      </label>
+      <label className="block space-y-1 text-xs text-bai-mute">
+        Build steps
+        <textarea
+          className={INPUT_CLS}
+          rows={3}
+          placeholder={"One step per line\n1. Data layer\n2. API route\n3. UI"}
+          value={steps}
+          onChange={(e) => setSteps(e.target.value)}
+        />
+      </label>
+      <label className="block space-y-1 text-xs text-bai-mute">
+        Done when
+        <textarea
+          className={INPUT_CLS}
+          rows={3}
+          placeholder={"One criterion per line — agents are graded on these"}
+          value={criteria}
+          onChange={(e) => setCriteria(e.target.value)}
+        />
+      </label>
+      <div className="flex flex-wrap items-center gap-2 pt-1">
+        <span className="text-xs text-bai-mute">Priority</span>
         {(["low", "medium", "high"] as const).map((p) => (
           <button
             key={p}
@@ -1060,7 +1210,7 @@ function TaskCard({
               }
               className="w-full rounded border border-dashed border-bai-line px-2 py-1 text-[10px] text-bai-mute hover:border-bai-orange hover:text-bai-orange"
             >
-              Log run & cost
+              Log cost in Settings
             </button>
           ) : null}
         </div>
@@ -1139,7 +1289,15 @@ function isQuiet(board: Board): boolean {
   return board.tasks.length === 0 && board.prs.length === 0;
 }
 
-function PortfolioOverview({ boards, spend }: { boards: Board[]; spend?: SpendSummary }) {
+function PortfolioOverview({
+  boards,
+  spend,
+  onSelectProject,
+}: {
+  boards: Board[];
+  spend?: SpendSummary;
+  onSelectProject?: (projectId: string) => void;
+}) {
   return (
     <section className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4">
       {boards.map((board) => {
@@ -1151,9 +1309,7 @@ function PortfolioOverview({ boards, spend }: { boards: Board[]; spend?: SpendSu
           <button
             key={board.project.id}
             type="button"
-            onClick={() =>
-              document.getElementById(`project-${board.project.id}`)?.scrollIntoView({ behavior: "smooth", block: "start" })
-            }
+            onClick={() => onSelectProject?.(board.project.id)}
             className={`rounded-lg border p-3 text-left transition-colors ${
               budget?.anyExceeded
                 ? "border-red-500/50 bg-red-500/5 hover:border-red-500/70"
@@ -1207,34 +1363,6 @@ function PortfolioOverview({ boards, spend }: { boards: Board[]; spend?: SpendSu
   );
 }
 
-function QuietProjectRow({ board, onNewTask, spend }: { board: Board; onNewTask: (id: string) => void; spend?: SpendSummary }) {
-  const pSpend = projectSpend(spend, board.project.id);
-  return (
-    <div
-      id={`project-${board.project.id}`}
-      className="scroll-mt-4 flex flex-wrap items-center gap-3 rounded-md border border-bai-line/70 bg-bai-surface/40 px-3 py-2"
-    >
-      <DomainBadge domain={board.project.domain} repo={board.project.repo} size="xs" />
-      <span className="text-sm font-medium text-bai-fg/90">{board.project.name}</span>
-      {pSpend && pSpend.totalUsd > 0 ? <SpendPill amount={pSpend.totalUsd} label="spent" tone="mute" /> : null}
-      <a
-        className="text-[11px] text-bai-mute/60 hover:text-bai-mute"
-        href={`https://github.com/${board.project.repo}`}
-        target="_blank"
-        rel="noreferrer"
-      >
-        {board.project.repo}
-      </a>
-      <button
-        type="button"
-        onClick={() => onNewTask(board.project.id)}
-        className="ml-auto rounded-md border border-bai-line px-2.5 py-1 text-xs text-bai-mute hover:border-bai-orange hover:text-bai-orange transition-colors"
-      >
-        + first task
-      </button>
-    </div>
-  );
-}
 
 function ProjectBoard({
   board,
@@ -1242,12 +1370,14 @@ function ProjectBoard({
   providers,
   spend,
   onLogRun,
+  showHeader = true,
 }: {
   board: Board;
   provider: AgentProviderId;
   providers: AgentProvider[];
   spend?: SpendSummary;
   onLogRun: (prefill: { projectId: string; issueNumber: number; title: string; provider: AgentProviderId }) => void;
+  showHeader?: boolean;
 }) {
   const pSpend = projectSpend(spend, board.project.id);
   const budget = projectBudget(spend, board.project.id);
@@ -1259,28 +1389,34 @@ function ProjectBoard({
           <strong className="font-semibold">Budget exceeded</strong> — agent dispatch is blocked for this project until spend drops or you raise limits.
         </div>
       ) : null}
-      <div className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-bai-line/80 bg-bai-surface/20 px-3 py-2.5">
-        <div className="space-y-1.5 min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-lg font-semibold text-bai-fg">{board.project.name}</h2>
-            <DomainBadge domain={board.project.domain} repo={board.project.repo} />
+      <div className={`flex flex-wrap items-start justify-between gap-3 ${showHeader ? "rounded-lg border border-bai-line/80 bg-bai-surface/20 px-3 py-2.5" : ""}`}>
+        {showHeader ? (
+          <div className="space-y-1.5 min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-lg font-semibold text-bai-fg">{board.project.name}</h2>
+              <DomainBadge domain={board.project.domain} repo={board.project.repo} />
+            </div>
+            <a
+              className="text-xs text-bai-mute hover:text-bai-metal"
+              href={`https://github.com/${board.project.repo}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              {board.project.repo}
+            </a>
+            {pSpend ? (
+              <p className="text-[11px] tabular-nums text-bai-mute">
+                <span className="text-bai-orange font-medium">{usd(pSpend.totalUsd)}</span> total ·{" "}
+                {usd(pSpend.todayUsd)} today · {usd(pSpend.monthlyUsd)} this month · {pSpend.runs} runs
+              </p>
+            ) : null}
           </div>
-          <a
-            className="text-xs text-bai-mute hover:text-bai-metal"
-            href={`https://github.com/${board.project.repo}`}
-            target="_blank"
-            rel="noreferrer"
-          >
-            {board.project.repo}
-          </a>
-          {pSpend ? (
-            <p className="text-[11px] tabular-nums text-bai-mute">
-              <span className="text-bai-orange font-medium">{usd(pSpend.totalUsd)}</span> total ·{" "}
-              {usd(pSpend.todayUsd)} today · {usd(pSpend.monthlyUsd)} this month · {pSpend.runs} runs
-            </p>
-          ) : null}
-        </div>
-        {budget ? (
+        ) : pSpend && pSpend.totalUsd > 0 ? (
+          <p className="text-[11px] tabular-nums text-bai-mute">
+            <span className="text-bai-orange font-medium">{usd(pSpend.totalUsd)}</span> spent on this project
+          </p>
+        ) : null}
+        {budget && (budget.hasLimits || budget.anyExceeded) ? (
           <div className="w-full sm:w-64 shrink-0">
             <ProjectBudgetCard budget={budget} />
           </div>
@@ -1290,7 +1426,7 @@ function ProjectBoard({
       {board.prs.length > 0 ? (
         <div className="rounded-lg border border-bai-orange/40 bg-bai-orange/5 p-3 space-y-2">
           <p className="text-xs font-semibold uppercase tracking-wider text-bai-orange">
-            Awaiting your review — ships to {board.project.domain ?? "main (no domain linked)"}
+            Review & approve → ships to {board.project.domain ?? "main"}
           </p>
           {board.prs.map((pr) => (
             <PrReviewRow key={pr.number} repo={board.project.repo} pr={pr} domain={board.project.domain} />
@@ -1299,6 +1435,9 @@ function ProjectBoard({
       ) : null}
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        {!showHeader ? (
+          <p className="col-span-full text-xs font-medium uppercase tracking-wider text-bai-mute">Task board</p>
+        ) : null}
         {STAGES.map((stage) => {
           const tasks = board.tasks.filter((t) => t.stage === stage.key);
           return (
@@ -1329,9 +1468,437 @@ function ProjectBoard({
   );
 }
 
+/* ── navigation & views ─────────────────────────────────────── */
+
+function boardScore(board: Board): number {
+  return board.prs.length * 100 + board.tasks.filter((t) => t.stage === "agent:ready").length * 10 + board.tasks.length;
+}
+
+function TabButton({
+  active,
+  label,
+  badge,
+  onClick,
+}: {
+  active: boolean;
+  label: string;
+  badge?: number;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={active}
+      onClick={onClick}
+      className={`relative flex shrink-0 items-center gap-2 border-b-2 px-1 pb-3 pt-1 text-sm font-medium transition-colors ${
+        active
+          ? "border-bai-orange text-bai-fg"
+          : "border-transparent text-bai-mute hover:border-bai-line hover:text-bai-metal"
+      }`}
+    >
+      {label}
+      {badge != null && badge > 0 ? (
+        <span
+          className={`rounded-full px-1.5 py-0.5 text-[10px] tabular-nums font-semibold ${
+            active ? "bg-bai-orange text-bai-bg" : "bg-bai-surface text-bai-mute"
+          }`}
+        >
+          {badge}
+        </span>
+      ) : null}
+    </button>
+  );
+}
+
+function CompactAgentPicker({
+  providers,
+  selected,
+  onSelect,
+}: {
+  providers: AgentProvider[];
+  selected: AgentProviderId;
+  onSelect: (id: AgentProviderId) => void;
+}) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      {providers.map((p) => {
+        const active = selected === p.id;
+        return (
+          <button
+            key={p.id}
+            type="button"
+            onClick={() => onSelect(p.id)}
+            title={p.tagline}
+            className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs transition-colors ${
+              active
+                ? "border-bai-orange/60 bg-bai-orange/15 text-bai-fg"
+                : "border-bai-line bg-bai-surface/50 text-bai-mute hover:border-bai-mute/50 hover:text-bai-fg"
+            }`}
+          >
+            <span className={`h-1.5 w-1.5 rounded-full ${providerDot(p.tone)}`} />
+            {p.shortLabel}
+            {!p.available ? <span className="text-red-400">·</span> : null}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function DashboardView({
+  boards,
+  spend,
+  totals,
+  onOpenProject,
+  onOpenProjects,
+  onOpenNewTask,
+}: {
+  boards: Board[];
+  spend?: SpendSummary;
+  totals: { ready: number; building: number; review: number; prs: number };
+  onOpenProject: (projectId: string) => void;
+  onOpenProjects: () => void;
+  onOpenNewTask: (projectId?: string) => void;
+}) {
+  const reviewQueue = boards.flatMap((b) => b.prs.map((pr) => ({ board: b, pr })));
+  const readyQueue = boards.flatMap((b) =>
+    b.tasks.filter((t) => t.stage === "agent:ready").map((task) => ({ board: b, task }))
+  );
+  const quietCount = boards.filter(isQuiet).length;
+
+  return (
+    <div className="mx-auto max-w-6xl space-y-8">
+      <WorkflowStrip />
+
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <StatCard label="Awaiting review" value={totals.prs} tone={totals.prs > 0 ? "accent" : "default"} />
+        <StatCard label="Ready for agents" value={totals.ready} tone={totals.ready > 0 ? "warn" : "default"} />
+        <StatCard label="Building" value={totals.building} />
+        <StatCard label="Spend today" value={spend ? usd(spend.todayUsd) : "$0.00"} />
+      </div>
+
+      <section className="space-y-3">
+        <div className="flex items-end justify-between gap-3">
+          <div>
+            <h3 className="text-base font-semibold text-bai-fg">Needs your attention</h3>
+            <p className="text-xs text-bai-mute">Approve PRs or dispatch agents on ready tasks.</p>
+          </div>
+          {reviewQueue.length + readyQueue.length > 0 ? (
+            <button
+              type="button"
+              onClick={onOpenProjects}
+              className="text-xs text-bai-orange hover:text-bai-orange-deep"
+            >
+              Open all projects →
+            </button>
+          ) : null}
+        </div>
+
+        {reviewQueue.length === 0 && readyQueue.length === 0 ? (
+          <div className="rounded-xl border border-bai-line/80 bg-bai-surface/20 px-4 py-8 text-center">
+            <p className="text-sm text-bai-fg">All clear — nothing waiting on you.</p>
+            <button
+              type="button"
+              onClick={() => onOpenNewTask()}
+              className="mt-3 rounded-md bg-bai-orange px-4 py-2 text-sm font-semibold text-bai-bg hover:bg-bai-orange-deep"
+            >
+              Queue a new task
+            </button>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {reviewQueue.length > 0 ? (
+              <div className="rounded-xl border border-bai-orange/40 bg-bai-orange/5 p-4 space-y-2">
+                <p className="text-xs font-semibold uppercase tracking-wider text-bai-orange">
+                  {reviewQueue.length} PR{reviewQueue.length === 1 ? "" : "s"} awaiting review
+                </p>
+                {reviewQueue.map(({ board, pr }) => (
+                  <div key={`${board.project.id}-${pr.number}`}>
+                    <div className="mb-1 flex flex-wrap items-center gap-2">
+                      <DomainBadge domain={board.project.domain} repo={board.project.repo} size="xs" />
+                      <button
+                        type="button"
+                        onClick={() => onOpenProject(board.project.id)}
+                        className="text-[11px] text-bai-mute hover:text-bai-orange"
+                      >
+                        {board.project.name}
+                      </button>
+                    </div>
+                    <PrReviewRow repo={board.project.repo} pr={pr} domain={board.project.domain} />
+                  </div>
+                ))}
+              </div>
+            ) : null}
+
+            {readyQueue.length > 0 ? (
+              <div className="rounded-xl border border-bai-line bg-bai-surface/20 p-4 space-y-2">
+                <p className="text-xs font-semibold uppercase tracking-wider text-bai-mute">
+                  {readyQueue.length} task{readyQueue.length === 1 ? "" : "s"} ready for agents
+                </p>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {readyQueue.slice(0, 6).map(({ board, task }) => (
+                    <button
+                      key={`${board.project.id}-${task.number}`}
+                      type="button"
+                      onClick={() => onOpenProject(board.project.id)}
+                      className="rounded-lg border border-bai-line bg-bai-bg/60 p-3 text-left hover:border-bai-orange/50"
+                    >
+                      <div className="mb-1">
+                        <DomainBadge domain={board.project.domain} repo={board.project.repo} size="xs" />
+                      </div>
+                      <p className="text-sm text-bai-fg line-clamp-2">{task.title}</p>
+                      <p className="mt-1 text-[11px] text-bai-mute">#{task.number} · {board.project.name}</p>
+                    </button>
+                  ))}
+                </div>
+                {readyQueue.length > 6 ? (
+                  <button type="button" onClick={onOpenProjects} className="text-xs text-bai-orange">
+                    + {readyQueue.length - 6} more in Projects
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+        )}
+      </section>
+
+      <section className="space-y-3">
+        <div>
+          <h3 className="text-base font-semibold text-bai-fg">All projects</h3>
+          <p className="text-xs text-bai-mute">Click a card to open its board in Projects.</p>
+        </div>
+        {boards.length > 0 ? (
+          <PortfolioOverview boards={boards} spend={spend} onSelectProject={onOpenProject} />
+        ) : (
+          <p className="text-sm text-bai-mute">Loading projects…</p>
+        )}
+        {quietCount > 0 ? (
+          <p className="text-xs text-bai-mute">
+            {quietCount} quiet project{quietCount === 1 ? "" : "s"} with no activity — browse in{" "}
+            <button type="button" onClick={onOpenProjects} className="text-bai-orange hover:underline">
+              Projects
+            </button>
+            .
+          </p>
+        ) : null}
+      </section>
+    </div>
+  );
+}
+
+function ProjectListItem({
+  board,
+  active,
+  onClick,
+  spend,
+}: {
+  board: Board;
+  active: boolean;
+  onClick: () => void;
+  spend?: SpendSummary;
+}) {
+  const ready = board.tasks.filter((t) => t.stage === "agent:ready").length;
+  const building = board.tasks.filter((t) => t.stage === "agent:building").length;
+  const quiet = isQuiet(board);
+  const budget = projectBudget(spend, board.project.id);
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`w-full rounded-lg border px-3 py-2.5 text-left transition-colors ${
+        active
+          ? "border-bai-orange/60 bg-bai-orange/10"
+          : quiet
+            ? "border-bai-line/50 bg-bai-surface/20 hover:border-bai-line"
+            : "border-bai-line bg-bai-surface/30 hover:border-bai-mute/40"
+      }`}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium text-bai-fg">{board.project.name}</p>
+          <p className="mt-0.5 truncate text-[10px] text-bai-mute">{board.project.domain ?? board.project.repo.split("/")[1]}</p>
+        </div>
+        {board.prs.length > 0 ? (
+          <span className="shrink-0 rounded-full bg-bai-orange px-1.5 text-[10px] font-bold text-bai-bg">
+            {board.prs.length}
+          </span>
+        ) : null}
+      </div>
+      <div className="mt-2 flex flex-wrap gap-2 text-[10px] tabular-nums">
+        {quiet ? (
+          <span className="text-bai-mute/60">quiet</span>
+        ) : (
+          <>
+            {ready > 0 ? <span className="text-bai-orange">{ready} ready</span> : null}
+            {building > 0 ? <span className="text-bai-metal">{building} building</span> : null}
+          </>
+        )}
+        {budget?.anyExceeded ? <span className="text-red-400">over budget</span> : null}
+      </div>
+    </button>
+  );
+}
+
+function ProjectsView({
+  boards,
+  selectedProjectId,
+  onSelectProject,
+  provider,
+  providers,
+  spend,
+  onLogRun,
+  onNewTask,
+}: {
+  boards: Board[];
+  selectedProjectId: string | null;
+  onSelectProject: (id: string) => void;
+  provider: AgentProviderId;
+  providers: AgentProvider[];
+  spend?: SpendSummary;
+  onLogRun: (prefill: { projectId: string; issueNumber: number; title: string; provider: AgentProviderId }) => void;
+  onNewTask: (projectId: string) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<"all" | "active" | "quiet">("all");
+
+  const sorted = [...boards].sort((a, b) => boardScore(b) - boardScore(a));
+  const filtered = sorted.filter((b) => {
+    if (filter === "active" && isQuiet(b)) return false;
+    if (filter === "quiet" && !isQuiet(b)) return false;
+    if (!query.trim()) return true;
+    const q = query.toLowerCase();
+    return (
+      b.project.name.toLowerCase().includes(q) ||
+      b.project.id.toLowerCase().includes(q) ||
+      (b.project.domain?.toLowerCase().includes(q) ?? false) ||
+      b.project.repo.toLowerCase().includes(q)
+    );
+  });
+
+  const effectiveId =
+    selectedProjectId ??
+    sorted.find((b) => !isQuiet(b))?.project.id ??
+    sorted[0]?.project.id ??
+    null;
+
+  const selected = boards.find((b) => b.project.id === effectiveId) ?? null;
+
+  const filterBtn = (key: typeof filter, label: string, count: number) => (
+    <button
+      type="button"
+      onClick={() => setFilter(key)}
+      className={`rounded-full px-2.5 py-1 text-[11px] transition-colors ${
+        filter === key ? "bg-bai-orange/15 text-bai-orange" : "text-bai-mute hover:text-bai-fg"
+      }`}
+    >
+      {label} ({count})
+    </button>
+  );
+
+  return (
+    <div className="flex h-full min-h-0 flex-col gap-4 lg:flex-row lg:gap-6">
+      <aside className="flex max-h-56 shrink-0 flex-col min-h-0 border-b border-bai-line pb-4 lg:max-h-none lg:w-72 lg:shrink-0 lg:border-b-0 lg:border-r lg:pr-4">
+        <div className="shrink-0 space-y-3 pb-3">
+          <input
+            className={INPUT_CLS}
+            placeholder="Search by name, domain, repo…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+          <div className="flex flex-wrap gap-1.5">
+            {filterBtn("all", "All", boards.length)}
+            {filterBtn("active", "Active", boards.filter((b) => !isQuiet(b)).length)}
+            {filterBtn("quiet", "Quiet", boards.filter(isQuiet).length)}
+          </div>
+        </div>
+        <div className="min-h-0 flex-1 space-y-1.5 overflow-y-auto pr-1">
+          {filtered.map((board) => (
+            <ProjectListItem
+              key={board.project.id}
+              board={board}
+              active={effectiveId === board.project.id}
+              onClick={() => onSelectProject(board.project.id)}
+              spend={spend}
+            />
+          ))}
+          {filtered.length === 0 ? (
+            <p className="px-2 py-4 text-xs text-bai-mute">No projects match.</p>
+          ) : null}
+        </div>
+      </aside>
+
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {selected ? (
+          <>
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 className="text-lg font-semibold text-bai-fg">{selected.project.name}</h3>
+                  <DomainBadge domain={selected.project.domain} repo={selected.project.repo} size="xs" />
+                </div>
+                <a
+                  className="mt-1 inline-block text-xs text-bai-mute hover:text-bai-orange"
+                  href={`https://github.com/${selected.project.repo}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {selected.project.repo} ↗
+                </a>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => onNewTask(selected.project.id)}
+                  className="rounded-md border border-bai-line px-3 py-1.5 text-xs text-bai-fg hover:border-bai-orange hover:text-bai-orange"
+                >
+                  + New task
+                </button>
+              </div>
+            </div>
+
+            {isQuiet(selected) ? (
+              <div className="rounded-xl border border-bai-line/80 bg-bai-surface/20 p-8 text-center">
+                <p className="text-sm text-bai-mute">No agent activity yet — queue the first task for this product.</p>
+                <button
+                  type="button"
+                  onClick={() => onNewTask(selected.project.id)}
+                  className="mt-4 rounded-md bg-bai-orange px-4 py-2 text-sm font-semibold text-bai-bg hover:bg-bai-orange-deep"
+                >
+                  Queue first task
+                </button>
+              </div>
+            ) : (
+              <ProjectBoard
+                board={selected}
+                provider={provider}
+                providers={providers}
+                spend={spend}
+                onLogRun={onLogRun}
+                showHeader={false}
+              />
+            )}
+          </>
+        ) : (
+          <p className="text-sm text-bai-mute">Select a project from the list.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /* ── shell ───────────────────────────────────────────────────── */
 
 function BaiDigitalOffice() {
+  const [tab, setTab] = useState<OfficeTab>(() => {
+    const saved = localStorage.getItem(TAB_KEY);
+    if (saved === "dashboard" || saved === "projects" || saved === "new-task" || saved === "spend" || saved === "settings") {
+      return saved;
+    }
+    return "dashboard";
+  });
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [formProject, setFormProject] = useState<string | null>(null);
   const [logPrefill, setLogPrefill] = useState<{
     projectId: string;
@@ -1345,6 +1912,10 @@ function BaiDigitalOffice() {
       ? saved
       : "claude-code";
   });
+
+  useEffect(() => {
+    localStorage.setItem(TAB_KEY, tab);
+  }, [tab]);
 
   useEffect(() => {
     localStorage.setItem(PROVIDER_KEY, provider);
@@ -1371,9 +1942,9 @@ function BaiDigitalOffice() {
   });
 
   const providers = agentsQuery.data?.providers ?? [];
+  const projects = projectsQuery.data?.projects ?? [];
   const boards = boardQuery.data?.boards ?? [];
   const activeBoards = boards.filter((b) => !isQuiet(b));
-  const quietBoards = boards.filter(isQuiet);
   const spend = spendQuery.data?.spend;
   const totals = boards.reduce(
     (acc, b) => {
@@ -1388,106 +1959,205 @@ function BaiDigitalOffice() {
     { ready: 0, building: 0, review: 0, prs: 0 }
   );
 
+  const attentionCount = totals.prs + totals.ready;
+
+  const openProject = (projectId: string) => {
+    setSelectedProjectId(projectId);
+    setTab("projects");
+  };
+
+  const openNewTask = (projectId?: string) => {
+    if (projectId) setFormProject(projectId);
+    setTab("new-task");
+  };
+
+  const openSettingsForLog = (prefill: {
+    projectId: string;
+    issueNumber: number;
+    title: string;
+    provider: AgentProviderId;
+  }) => {
+    setLogPrefill(prefill);
+    setTab("settings");
+  };
+
+  useEffect(() => {
+    if (tab === "settings" && logPrefill) {
+      requestAnimationFrame(() => {
+        document.getElementById("log-run-form")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      });
+    }
+  }, [tab, logPrefill]);
+
+  if (projectsQuery.data && !projectsQuery.data.github) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-bai-bg p-6 text-bai-fg">
+        <div className="max-w-md rounded-xl border border-bai-line bg-bai-surface/30 p-6 text-center">
+          <h1 className="text-xl font-bold">
+            bai digital <span className="text-bai-orange">office</span>
+          </h1>
+          <p className="mt-4 text-sm text-bai-orange">
+            Set <code>GITHUB_TOKEN</code> in environment variables (repo scope) and redeploy.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="min-h-screen bg-bai-bg text-bai-fg">
-      <header className="border-b border-bai-line bg-bai-surface/20">
-        <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-x-6 gap-y-3 px-6 py-4">
-          <div>
-            <h1 className="text-xl font-bold tracking-tight">
+    <div className="flex h-screen flex-col overflow-hidden bg-bai-bg text-bai-fg">
+      <header className="shrink-0 border-b border-bai-line bg-bai-surface/30">
+        <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 sm:px-6">
+          <div className="min-w-0">
+            <h1 className="text-lg font-bold tracking-tight sm:text-xl">
               bai digital <span className="text-bai-orange">office</span>
             </h1>
-            <p className="text-xs text-bai-mute">
-              Task → agent builds PR → you approve → Vercel ships. Track spend across Claude, Cursor, and API.
-            </p>
           </div>
-          <div className="ml-auto flex flex-wrap items-center gap-3 text-xs tabular-nums">
+          <div className="ml-auto flex flex-wrap items-center gap-2 text-[11px] tabular-nums">
             {boards.length > 0 ? (
               <>
-                <span className="rounded-full border border-bai-line px-2.5 py-1 text-bai-orange">{totals.ready} ready</span>
-                <span className="rounded-full border border-bai-line px-2.5 py-1 text-bai-metal">{totals.building} building</span>
-                <span
-                  className={
-                    totals.prs > 0
-                      ? "rounded-full bg-bai-orange px-2.5 py-1 font-semibold text-bai-bg"
-                      : "rounded-full border border-bai-line px-2.5 py-1 text-bai-mute"
-                  }
-                >
-                  {totals.prs} awaiting review
-                </span>
+                {totals.prs > 0 ? (
+                  <span className="rounded-full bg-bai-orange px-2 py-0.5 font-semibold text-bai-bg">
+                    {totals.prs} review
+                  </span>
+                ) : null}
+                {totals.ready > 0 ? (
+                  <span className="rounded-full border border-bai-orange/40 px-2 py-0.5 text-bai-orange">
+                    {totals.ready} ready
+                  </span>
+                ) : null}
               </>
             ) : null}
             {spend ? (
-              <span className="rounded-full border border-bai-orange/30 bg-bai-orange/10 px-2.5 py-1 text-bai-orange">
-                {usd(spend.todayUsd)} today · {usd(spend.totalUsd)} total
+              <span className="rounded-full border border-bai-line px-2 py-0.5 text-bai-mute">
+                {usd(spend.todayUsd)} today
               </span>
             ) : null}
           </div>
         </div>
+
+        <nav className="mx-auto flex max-w-7xl gap-4 overflow-x-auto px-4 sm:gap-6 sm:px-6" role="tablist" aria-label="Office sections">
+          {(Object.keys(TAB_META) as OfficeTab[]).map((id) => (
+            <TabButton
+              key={id}
+              active={tab === id}
+              label={TAB_META[id].label}
+              badge={
+                id === "dashboard"
+                  ? attentionCount
+                  : id === "projects"
+                    ? activeBoards.length
+                    : undefined
+              }
+              onClick={() => setTab(id)}
+            />
+          ))}
+        </nav>
       </header>
 
-      <main className="mx-auto grid max-w-7xl grid-cols-1 items-start gap-8 p-6 lg:grid-cols-[320px_1fr]">
-        <aside className="space-y-0 lg:sticky lg:top-6 lg:max-h-[calc(100vh-3rem)] lg:overflow-y-auto">
-          {projectsQuery.data ? (
-            projectsQuery.data.github ? (
-              <>
-                <NewTaskForm
-                  projects={projectsQuery.data.projects}
-                  selectedProject={formProject}
-                  onProjectChange={setFormProject}
-                />
-                <AgentFleetPanel selected={provider} onSelect={setProvider} />
-                <LogRunForm
-                  projects={projectsQuery.data.projects}
-                  prefill={logPrefill}
-                  onLogged={() => setLogPrefill(null)}
-                />
-                {spend?.budgets ? <ProjectBudgetsEditor budgets={spend.budgets} /> : null}
-              </>
-            ) : (
-              <p className="text-sm text-bai-orange">
-                Set <code>GITHUB_TOKEN</code> in <code>.env.local</code> (repo scope) and restart the server.
-              </p>
-            )
+      <main
+        className={`mx-auto min-h-0 w-full max-w-7xl flex-1 px-4 py-6 sm:px-6 ${
+          tab === "projects" ? "flex flex-col overflow-hidden" : "overflow-y-auto"
+        }`}
+      >
+        {tab !== "dashboard" ? (
+          <PageHeader title={TAB_META[tab].label} description={TAB_META[tab].hint} />
+        ) : null}
+
+        {boardQuery.isError ? (
+          <p className="mb-4 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
+            {(boardQuery.error as Error).message}
+          </p>
+        ) : null}
+
+        {tab === "dashboard" ? (
+          boardQuery.isLoading ? (
+            <LoadingBlock label="Loading your portfolio…" />
           ) : (
-            <p className="text-sm text-bai-mute">Loading projects…</p>
-          )}
-        </aside>
+            <DashboardView
+              boards={boards}
+              spend={spend}
+              totals={totals}
+              onOpenProject={openProject}
+              onOpenProjects={() => setTab("projects")}
+              onOpenNewTask={openNewTask}
+            />
+          )
+        ) : null}
 
-        <div className="space-y-10 min-w-0">
-          {boardQuery.isLoading ? <p className="text-sm text-bai-mute">Loading board…</p> : null}
-          {boardQuery.isError ? <p className="text-sm text-red-400">{(boardQuery.error as Error).message}</p> : null}
-
-          <SpendDashboard providers={providers} />
-
-          {boards.length > 0 ? (
-            <div className="space-y-3">
-              <h2 className="text-sm font-semibold uppercase tracking-wider text-bai-mute">Portfolio</h2>
-              <PortfolioOverview boards={boards} spend={spend} />
-            </div>
-          ) : null}
-
-          {activeBoards.map((board) => (
-            <ProjectBoard
-              key={board.project.id}
-              board={board}
+        {tab === "projects" ? (
+          boardQuery.isLoading ? (
+            <LoadingBlock label="Loading projects…" />
+          ) : (
+            <ProjectsView
+              boards={boards}
+              selectedProjectId={selectedProjectId}
+              onSelectProject={setSelectedProjectId}
               provider={provider}
               providers={providers}
               spend={spend}
-              onLogRun={setLogPrefill}
+              onLogRun={openSettingsForLog}
+              onNewTask={openNewTask}
             />
-          ))}
+          )
+        ) : null}
 
-          {quietBoards.length > 0 ? (
-            <section className="space-y-2">
-              <h2 className="text-xs font-semibold uppercase tracking-wider text-bai-mute">
-                Quiet projects — no agent activity yet
-              </h2>
-              {quietBoards.map((board) => (
-                <QuietProjectRow key={board.project.id} board={board} onNewTask={setFormProject} spend={spend} />
-              ))}
+        {tab === "new-task" ? (
+          <div className="mx-auto max-w-2xl space-y-5">
+            {projects.length > 0 ? (
+              <>
+                <div className="space-y-2">
+                  <p className="text-xs font-medium uppercase tracking-wider text-bai-mute">Default agent</p>
+                  <CompactAgentPicker providers={providers} selected={provider} onSelect={setProvider} />
+                  <p className="text-[11px] text-bai-mute/80">
+                    Used for dispatch commands on ready tasks. Change anytime in Settings.
+                  </p>
+                </div>
+                <NewTaskForm
+                  projects={projects}
+                  selectedProject={formProject}
+                  onProjectChange={setFormProject}
+                  showTitle={false}
+                  onCreated={({ projectId }) => {
+                    setSelectedProjectId(projectId);
+                  }}
+                />
+              </>
+            ) : (
+              <LoadingBlock label="Loading projects…" />
+            )}
+          </div>
+        ) : null}
+
+        {tab === "spend" ? <SpendDashboard providers={providers} /> : null}
+
+        {tab === "settings" ? (
+          <div className="mx-auto max-w-3xl space-y-10">
+            <section>
+              <h3 className="mb-3 text-sm font-semibold text-bai-fg">Default agent</h3>
+              <AgentFleetPanel selected={provider} onSelect={setProvider} showHeader={false} />
             </section>
-          ) : null}
-        </div>
+            {projects.length > 0 ? (
+              <>
+                <section>
+                  <h3 className="mb-3 text-sm font-semibold text-bai-fg">Manual run log</h3>
+                  <LogRunForm
+                    projects={projects}
+                    prefill={logPrefill}
+                    onLogged={() => setLogPrefill(null)}
+                    embedded
+                  />
+                </section>
+                {spend?.budgets ? (
+                  <section>
+                    <h3 className="mb-3 text-sm font-semibold text-bai-fg">Budget limits</h3>
+                    <ProjectBudgetsEditor budgets={spend.budgets} embedded />
+                  </section>
+                ) : null}
+              </>
+            ) : null}
+          </div>
+        ) : null}
       </main>
     </div>
   );

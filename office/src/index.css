@@ -3,7 +3,13 @@
 @tailwind utilities;
 
 @layer base {
+  html,
+  body,
+  #root {
+    @apply h-full;
+  }
+
   body {
-    @apply bg-bai-bg font-sans text-bai-fg antialiased;
+    @apply overflow-hidden bg-bai-bg font-sans text-bai-fg antialiased;
   }
 }
