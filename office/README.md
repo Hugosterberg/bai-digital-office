@@ -6,56 +6,80 @@ styled after [baidigital.xyz](https://baidigital.xyz) (near-black `#050505`, war
 `tailwind.config.ts`).
 
 Write a well-described task → it becomes a GitHub issue labeled `agent:ready` →
-an agent picks it up → you review the PR. No database — GitHub Issues are the
+a hosted worker picks it up → you review the PR. No database — GitHub Issues are the
 queue, PRs are the review surface.
 
-## The task lifecycle
+## Architecture (two services)
 
-| Stage | Meaning | Who moves it |
+| Service | Host | Role |
 |---|---|---|
-| `agent:ready` | Described with done-criteria, waiting | Created here |
-| `agent:building` | An agent claimed it | The agent |
-| `agent:review` | PR open (`Closes #N`) — awaiting Hugo | The agent |
-| closed | PR merged | GitHub, on merge |
+| **UI + API** | Vercel | Board, create tasks, merge PRs, spend/budgets |
+| **Agent worker** | Railway (always-on) | Polls GitHub, runs `claude -p`, builds PRs |
 
-Agents pick up work with:
+Vercel cannot run agents (no Claude CLI, no background process). The worker runs 24/7 in the cloud.
 
-```bash
-gh issue list --repo <owner/repo> --label agent:ready
+```
+You → baidigital.office.xyz → GitHub issue (agent:ready)
+                                    ↓
+              Railway worker → claude -p → PR → you approve in office
 ```
 
-Each issue body carries the company task template (Context / Build steps /
-Done when) plus the agent contract — everything an agent needs to build the
-slice and open a compliant PR.
+## Deploy Vercel (UI)
 
-## Run locally
+1. Import repo — **Root Directory** = `office`, preset **Other**.
+2. Environment variables:
 
-1. `cp .env.example .env.local` and set `GITHUB_TOKEN` (Issues + PRs read/write + merge on portfolio repos).
-2. `npm install` → `npm run dev` (UI on :8080, API on :3001).
-3. Ensure **Claude Code** is logged in (`claude`) and **GitHub CLI** (`gh auth login`) — agents use your platform.claude.com credits.
+| Variable | Value |
+|---|---|
+| `GITHUB_TOKEN` | GitHub PAT (Issues + PRs + merge) |
+| `OFFICE_SECRET` | Random secret (`openssl rand -hex 32`) |
+| `DISPATCH_DISABLED` | `true` |
+| `AGENT_POLL_ENABLED` | `false` |
+| `WORKER_WEBHOOK_URL` | `https://<your-worker>.up.railway.app/poll` |
+| `WORKER_SECRET` | Same secret as on Railway worker |
 
-### Auto agent pickup
+3. DNS → `baidigital.office.xyz`
 
-Set `AGENT_POLL_ENABLED=true` in `.env.local` — the API polls every 90s for
-`agent:ready` issues and dispatches headless `claude -p` runs (max 3 concurrent).
+## Deploy Railway (agents)
 
-Or run a dedicated worker:
+1. [railway.app](https://railway.app) → New Project → Deploy from GitHub → repo `bai-digital-office`.
+2. **Root Directory** = `office`.
+3. Settings → Build → Dockerfile path: **`Dockerfile.worker`** (or use `railway.toml`).
+4. Generate a public domain (Settings → Networking).
+5. Environment variables:
+
+| Variable | Value |
+|---|---|
+| `GITHUB_TOKEN` | Same as Vercel |
+| `ANTHROPIC_API_KEY` | From [console.anthropic.com](https://console.anthropic.com) — powers headless Claude Code |
+| `WORKER_SECRET` | Random secret — must match Vercel |
+| `DISPATCH_DISABLED` | `false` |
+| `AGENT_POLL_ENABLED` | `true` |
+| `AGENT_POLL_INTERVAL_MS` | `90000` |
+
+6. Copy the public URL → set `WORKER_WEBHOOK_URL=https://…/poll` on Vercel → redeploy Vercel.
+
+**Optional:** mount a Railway volume at `/app/server/data` to persist agent spend logs and project budgets across redeploys.
+
+### Verify worker
 
 ```bash
-npm run worker
+curl https://YOUR-WORKER.up.railway.app/health
+# → {"ok":true,"service":"bai-agent-worker"}
 ```
+
+Create a task on baidigital.office.xyz — within seconds the worker should pick it up (webhook) or within 90s (poll).
+
+## Run locally (development)
+
+1. `cp .env.example .env.local` — set `GITHUB_TOKEN`.
+2. `npm install` → `npm run dev` (UI :8080, API :3001).
+3. Optional: `npm run worker` in another terminal (or rely on hosted Railway worker).
 
 ## Approve → production
 
 Open PRs show on the board with CI status. Click **Approve → prod** to squash-merge
-to `main`. Vercel deploys production automatically when each product repo is linked.
+to `main`. Vercel deploys production when each product repo is linked.
 
-## Deploy (baidigital.office.xyz)
-
-1. Deploy this folder (`office/`) to Vercel — set **Root Directory** to `office` in the repo import.
-2. Env vars: `GITHUB_TOKEN`, `OFFICE_SECRET`, `DISPATCH_DISABLED=true` (Vercel has no Claude CLI).
-3. Point DNS `baidigital.office.xyz` at the Vercel project.
-4. Run `npm run worker` on your machine (or a small VPS) for agent dispatch — the UI and merge API work from Vercel.
-
-Projects shown on the board are defined in `server/lib/projects.ts` —
+Projects are defined in `server/lib/projects.ts` —
 mirror of [bai-digital-office/ai/PORTFOLIO.md](https://github.com/bai-digital-office/ai/blob/main/PORTFOLIO.md).

@@ -39,6 +39,7 @@ import {
 } from "./lib/dispatch.ts";
 import { startAgentPoller } from "./lib/agentPoller.ts";
 import { requireWriteAuth } from "./lib/auth.ts";
+import { notifyWorkerPoll } from "./lib/workerWebhook.ts";
 
 dotenv.config({ path: [".env.local", ".env"] });
 
@@ -120,6 +121,8 @@ app.post("/api/tasks", requireWriteAuth, async (req, res) => {
   if (autoDispatch) {
     const dispatch = startDispatch({ repo: project.repo, issueNumber: result.number, title });
     agent = dispatch.ok ? dispatch.dispatch : { error: dispatch.error };
+  } else {
+    void notifyWorkerPoll("task-created");
   }
   res.json({ ...result, agent });
 });
@@ -127,8 +130,16 @@ app.post("/api/tasks", requireWriteAuth, async (req, res) => {
 /** Dispatch a Claude Code agent on an existing agent:ready issue. */
 app.post("/api/dispatch", requireWriteAuth, async (req, res) => {
   if (!dispatchAvailable()) {
+    const ping = await notifyWorkerPoll("dispatch-request");
+    if (ping.ok) {
+      return res.json({
+        ok: true,
+        message: "Hosted agent worker notified — the agent will start within a few seconds.",
+      });
+    }
     return res.status(503).json({
-      error: "Agent dispatch is disabled on this host. Run the API locally or `npm run worker` with Claude Code logged in.",
+      error:
+        "Agent dispatch is disabled on this host and no WORKER_WEBHOOK_URL is configured. Deploy the Railway worker or run `npm run worker` locally.",
     });
   }
   const project = findProject(String(req.body?.project || ""));
