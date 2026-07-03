@@ -1,0 +1,5 @@
+{
+  "name": "Verify on PR",
+  "description": "Runs the repo's verify suite (typecheck, lint, tests, build) on every pull request to main.",
+  "categories": ["Continuous integration"]
+}
