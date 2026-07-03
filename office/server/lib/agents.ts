@@ -127,16 +127,28 @@ export interface AgentCatalogEntry extends AgentProvider {
   unavailableReason?: string;
 }
 
-export function agentCatalog(dispatchEnabled: boolean): AgentCatalogEntry[] {
+export function agentCatalog(options: {
+  dispatchEnabled: boolean;
+  workerConfigured: boolean;
+}): AgentCatalogEntry[] {
+  const { dispatchEnabled, workerConfigured } = options;
   return AGENT_PROVIDERS.map((provider) => {
     if (provider.dispatchMode === "office") {
-      return dispatchEnabled
-        ? { ...provider, available: true }
-        : {
-            ...provider,
-            available: false,
-            unavailableReason: "Dispatch disabled on this host — run locally or `npm run worker`.",
-          };
+      if (dispatchEnabled) {
+        return { ...provider, available: true };
+      }
+      if (workerConfigured) {
+        return {
+          ...provider,
+          available: true,
+          dispatchLabel: "Dispatch via hosted worker (Railway)",
+        };
+      }
+      return {
+        ...provider,
+        available: false,
+        unavailableReason: "Dispatch disabled — deploy the Railway worker or run locally.",
+      };
     }
     return { ...provider, available: true };
   });

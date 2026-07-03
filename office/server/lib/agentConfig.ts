@@ -299,6 +299,41 @@ export function resetSpecialistAgent(id: SpecialistAgentId): AgentTeamConfig {
   return setAgentTeamConfig({ specialists: { [id]: defaultSpecialistSettings(id) } });
 }
 
+/** Full config payload for worker sync. */
+export function exportAgentTeamConfigForWorker(): AgentTeamConfig {
+  return readAgentTeamConfig();
+}
+
+/** Overwrite local config from worker sync (Vercel → Railway). */
+export function applyAgentTeamConfig(config: {
+  stages: Record<PipelineStageId, StageSettings>;
+  specialists: Record<SpecialistAgentId, StageSettings>;
+  updatedAt?: string;
+}): AgentTeamConfig {
+  const updatedAt = config.updatedAt ?? new Date().toISOString();
+  mkdirSync(dirname(CONFIG_FILE), { recursive: true });
+  writeFileSync(
+    CONFIG_FILE,
+    JSON.stringify(
+      {
+        stages: {
+          analyze: mergeStage("analyze", config.stages.analyze),
+          implement: mergeStage("implement", config.stages.implement),
+          validate: mergeStage("validate", config.stages.validate),
+        },
+        specialists: {
+          growth: mergeSpecialist("growth", config.specialists.growth),
+          research: mergeSpecialist("research", config.specialists.research),
+        },
+        updatedAt,
+      },
+      null,
+      2
+    ) + "\n"
+  );
+  return readAgentTeamConfig();
+}
+
 export function isSpecialistAgentId(raw: string): raw is SpecialistAgentId {
   return raw === "growth" || raw === "research";
 }

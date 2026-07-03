@@ -6,7 +6,7 @@ import http from "node:http";
 import dotenv from "dotenv";
 import { pollReadyTasks } from "./lib/agentPoller.ts";
 import { findProject } from "./lib/projects.ts";
-import { isSpecialistAgentId } from "./lib/agentConfig.ts";
+import { isSpecialistAgentId, applyAgentTeamConfig } from "./lib/agentConfig.ts";
 import { startSpecialistRun } from "./lib/specialists.ts";
 
 dotenv.config({ path: [".env.local", ".env"] });
@@ -74,6 +74,30 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (req.method === "POST" && url === "/config") {
+    if (!authOk(req)) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Unauthorized" }));
+      return;
+    }
+    void readJsonBody(req)
+      .then((body) => {
+        if (!body.stages || !body.specialists) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Invalid config payload." }));
+          return;
+        }
+        applyAgentTeamConfig(body as Parameters<typeof applyAgentTeamConfig>[0]);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      })
+      .catch((err) => {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err instanceof Error ? err.message : "Bad request" }));
+      });
+    return;
+  }
+
   if (req.method === "POST" && url.startsWith("/specialist/")) {
     if (!authOk(req)) {
       res.writeHead(401, { "Content-Type": "application/json" });
@@ -120,7 +144,7 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(port, () => {
-  console.log(`[worker] listening on :${port} (GET /health · POST /poll · POST /specialist/:id)`);
+  console.log(`[worker] listening on :${port} (GET /health · POST /poll · POST /config · POST /specialist/:id)`);
   void tick("startup");
   setInterval(() => void tick("interval"), intervalMs);
 });

@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useEffect, useState } from "react";
+import { apiWrite, getJson, hasWriteSecret, setWriteSecret } from "./lib/api";
 
 const queryClient = new QueryClient();
 const PROVIDER_KEY = "bai-office-agent-provider";
@@ -41,6 +42,7 @@ interface TaskIssue {
   priority: string | null;
   updatedAt: string;
   assignee: string | null;
+  bodyPreview?: string;
 }
 
 interface ReviewPr {
@@ -126,6 +128,7 @@ interface AgentRun {
   source: "dispatch" | "manual";
   pipelineStage?: "analyze" | "implement" | "validate";
   pipelineId?: string;
+  specialist?: "growth" | "research";
   notes?: string;
   projectId?: string;
   projectName?: string;
@@ -239,9 +242,9 @@ function StatCard({
         ? "border-amber-400/30 bg-amber-400/5 text-amber-300"
         : "border-bai-line bg-bai-surface/30 text-bai-fg";
   return (
-    <div className={`rounded-lg border px-3 py-2.5 ${styles}`}>
-      <p className="text-[10px] font-medium uppercase tracking-wider opacity-80">{label}</p>
-      <p className="mt-1 text-xl font-semibold tabular-nums">{value}</p>
+    <div className={`rounded-md border px-2.5 py-2 ${styles}`}>
+      <p className="text-[9px] font-medium uppercase tracking-wider opacity-80">{label}</p>
+      <p className="mt-0.5 text-lg font-semibold tabular-nums">{value}</p>
     </div>
   );
 }
@@ -255,11 +258,77 @@ function LoadingBlock({ label = "Loading…" }: { label?: string }) {
   );
 }
 
-async function getJson<T>(url: string): Promise<T> {
-  const res = await fetch(url);
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error((data as { error?: string }).error || "Request failed");
-  return data as T;
+
+function SystemHealthBar() {
+  const health = useQuery({
+    queryKey: ["health"],
+    queryFn: () =>
+      getJson<{
+        github: boolean;
+        dispatch: boolean;
+        worker: boolean;
+        runningAgents: number;
+        writeAuthRequired: boolean;
+      }>("/api/health"),
+    refetchInterval: 30_000,
+  });
+  const h = health.data;
+  if (!h) return null;
+
+  const issues: string[] = [];
+  if (!h.github) issues.push("GitHub token missing");
+  if (!h.dispatch && !h.worker) issues.push("No agent worker");
+  if (h.writeAuthRequired && !hasWriteSecret()) issues.push("Write secret not set (Settings)");
+
+  if (issues.length === 0 && h.runningAgents === 0) return null;
+
+  return (
+    <div className="border-b border-bai-line/60 bg-bai-surface/30 px-4 py-1.5 text-[11px] text-bai-mute sm:px-6">
+      {issues.length > 0 ? (
+        <span className="text-amber-300">{issues.join(" · ")}</span>
+      ) : (
+        <span>
+          <span className="text-bai-orange">{h.runningAgents} agent{h.runningAgents === 1 ? "" : "s"} running</span>
+          {h.worker && !h.dispatch ? <span className="text-bai-mute"> · via worker</span> : null}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function WriteSecretSettings() {
+  const [secret, setSecret] = useState(() => localStorage.getItem("bai-office-write-secret") ?? "");
+  const [saved, setSaved] = useState(false);
+
+  return (
+    <section className="rounded-lg border border-bai-line bg-bai-surface/30 p-4 space-y-2">
+      <h4 className="text-xs font-semibold text-bai-fg">Write access</h4>
+      <p className="text-[11px] text-bai-mute">
+        Production requires <code className="text-bai-metal">OFFICE_SECRET</code> as Bearer token on writes. Paste it here once per browser.
+      </p>
+      <input
+        className={INPUT_CLS}
+        type="password"
+        value={secret}
+        onChange={(e) => {
+          setSecret(e.target.value);
+          setSaved(false);
+        }}
+        placeholder="Same as OFFICE_SECRET on Vercel"
+      />
+      <button
+        type="button"
+        onClick={() => {
+          setWriteSecret(secret);
+          setSaved(true);
+        }}
+        className="rounded-md border border-bai-line px-3 py-1.5 text-xs text-bai-fg hover:border-bai-orange"
+      >
+        Save secret
+      </button>
+      {saved ? <p className="text-xs text-emerald-400">Saved — writes will include Authorization header.</p> : null}
+    </section>
+  );
 }
 
 function providerDot(tone: string): string {
@@ -423,9 +492,8 @@ function ProjectBudgetsEditor({
   const save = useMutation({
     mutationFn: async (projectId: string) => {
       const d = drafts[projectId] ?? getDraft(budgets.find((b) => b.projectId === projectId)!);
-      const res = await fetch("/api/budgets", {
+      return apiWrite("/api/budgets", {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           project: projectId,
           dailyUsd: d.daily.trim() ? Number(d.daily) : null,
@@ -433,9 +501,6 @@ function ProjectBudgetsEditor({
           totalUsd: d.total.trim() ? Number(d.total) : null,
         }),
       });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error((data as { error?: string }).error || "Could not save budget");
-      return data;
     },
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["dispatches"] });
@@ -445,7 +510,7 @@ function ProjectBudgetsEditor({
   if (budgets.length === 0) return null;
 
   const editor = (
-    <div className={`space-y-3 ${embedded ? "" : "mt-2 max-h-80 overflow-y-auto rounded-lg border border-bai-line bg-bai-surface/20 p-2"}`}>
+    <div className={`space-y-2 ${embedded ? "" : "mt-2 max-h-72 overflow-y-auto scroll-hidden rounded-lg border border-bai-line bg-bai-surface/20 p-2"}`}>
       {!embedded ? (
         <p className="px-1 text-[11px] leading-relaxed text-bai-mute">
           Set USD caps per project. Auto-dispatch blocks when any limit is hit. Leave blank for no cap.
@@ -689,26 +754,16 @@ function AgentConfigEditor() {
   const dirty = settingsDirty(teamList, pipelineDraft) || settingsDirty(specialistList, specialistDraft);
 
   const save = useMutation({
-    mutationFn: async () => {
-      const res = await fetch("/api/agent-team", {
+    mutationFn: async () =>
+      apiWrite("/api/agent-team", {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ stages: pipelineDraft, specialists: specialistDraft }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error((data as { error?: string }).error || "Could not save agent settings.");
-      return data;
-    },
+      }),
     onSuccess: () => void qc.invalidateQueries({ queryKey: ["agents"] }),
   });
 
   const resetAgent = useMutation({
-    mutationFn: async (id: string) => {
-      const res = await fetch(`/api/agent-team/${id}/reset`, { method: "POST" });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error((data as { error?: string }).error || "Could not reset agent.");
-      return data;
-    },
+    mutationFn: async (id: string) => apiWrite(`/api/agent-team/${id}/reset`, { method: "POST" }),
     onSuccess: () => void qc.invalidateQueries({ queryKey: ["agents"] }),
   });
 
@@ -807,23 +862,31 @@ function SpecialistRunPanel({ projects }: { projects: Project[] }) {
   const [project, setProject] = useState(projects[0]?.id ?? "");
   const [focus, setFocus] = useState("");
   const [ideaCount, setIdeaCount] = useState("5");
+  const [lastRunId, setLastRunId] = useState<string | null>(null);
+
+  const runStatus = useQuery({
+    queryKey: ["dispatches"],
+    queryFn: () => getJson<{ dispatches: AgentRun[]; spend: SpendSummary }>("/api/dispatches"),
+    refetchInterval: lastRunId ? 5000 : false,
+    enabled: Boolean(lastRunId),
+  });
+
+  const activeSpecialistRun = lastRunId
+    ? runStatus.data?.dispatches.find((d) => d.id === lastRunId)
+    : undefined;
 
   const runSpecialist = useMutation({
-    mutationFn: async (id: "growth" | "research") => {
-      const res = await fetch(`/api/specialists/${id}/run`, {
+    mutationFn: async (id: "growth" | "research") =>
+      apiWrite<{ message?: string; run?: AgentRun }>(`/api/specialists/${id}/run`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           project,
           focus: focus.trim(),
           ideaCount: id === "growth" ? Number(ideaCount) || 5 : undefined,
         }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error((data as { error?: string }).error || "Specialist run failed");
-      return data as { message?: string };
-    },
-    onSuccess: () => {
+      }),
+    onSuccess: (data) => {
+      if (data.run?.id) setLastRunId(data.run.id);
       void qc.invalidateQueries({ queryKey: ["board"] });
       void qc.invalidateQueries({ queryKey: ["dispatches"] });
     },
@@ -890,7 +953,13 @@ function SpecialistRunPanel({ projects }: { projects: Project[] }) {
         </button>
       </div>
       {runSpecialist.isError ? <p className="text-xs text-red-400">{(runSpecialist.error as Error).message}</p> : null}
-      {runSpecialist.isSuccess ? (
+      {activeSpecialistRun?.status === "running" ? (
+        <p className="text-xs text-bai-orange animate-pulse">
+          Specialist running ({activeSpecialistRun.specialist ?? "agent"}) — ideas will appear in the Ideas column.
+        </p>
+      ) : activeSpecialistRun?.status === "done" ? (
+        <p className="text-xs text-emerald-400">Specialist finished — check the Ideas column on the project board.</p>
+      ) : runSpecialist.isSuccess ? (
         <p className="text-xs text-emerald-400">
           Agent started — check the Ideas column on the project board in a few minutes.
         </p>
@@ -1002,10 +1071,9 @@ function LogRunForm({
   }, [prefill]);
 
   const log = useMutation({
-    mutationFn: async () => {
-      const res = await fetch("/api/runs", {
+    mutationFn: async () =>
+      apiWrite("/api/runs", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           project,
           issueNumber: Number(issueNumber),
@@ -1015,11 +1083,7 @@ function LogRunForm({
           durationMs: durationMin.trim() ? Number(durationMin) * 60_000 : undefined,
           notes,
         }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error((data as { error?: string }).error || "Could not log run");
-      return data;
-    },
+      }),
     onSuccess: () => {
       setCostUsd("");
       setDurationMin("");
@@ -1339,25 +1403,22 @@ function NewTaskForm({
   const [steps, setSteps] = useState("");
   const [criteria, setCriteria] = useState("");
   const [priority, setPriority] = useState<"low" | "medium" | "high">("medium");
+  const criteriaLines = criteria.split("\n").map((c) => c.trim()).filter(Boolean);
+  const criteriaMissing = criteria.trim().length > 0 && criteriaLines.length === 0;
 
   const create = useMutation({
-    mutationFn: async () => {
-      const res = await fetch("/api/tasks", {
+    mutationFn: async () =>
+      apiWrite<{ number: number; url: string }>("/api/tasks", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           project,
           title,
           context,
           steps: steps.split("\n").filter((s) => s.trim()),
-          criteria: criteria.split("\n").filter((c) => c.trim()),
+          criteria: criteriaLines,
           priority,
         }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error((data as { error?: string }).error || "Could not create the task");
-      return data as { number: number; url: string };
-    },
+      }),
     onSuccess: (data) => {
       setTitle("");
       setContext("");
@@ -1373,6 +1434,7 @@ function NewTaskForm({
       className="space-y-4 rounded-xl border border-bai-line bg-bai-surface/30 p-5"
       onSubmit={(e) => {
         e.preventDefault();
+        if (!criteria.trim()) return;
         create.mutate();
       }}
     >
@@ -1443,12 +1505,17 @@ function NewTaskForm({
         ))}
         <button
           type="submit"
-          disabled={create.isPending || !title.trim()}
+          disabled={create.isPending || !title.trim() || !criteria.trim()}
           className="ml-auto rounded-md bg-bai-orange px-4 py-2 text-sm font-semibold text-bai-bg hover:bg-bai-orange-deep disabled:opacity-50"
         >
           {create.isPending ? "Creating…" : "Queue for agents"}
         </button>
       </div>
+      {!criteria.trim() ? (
+        <p className="text-[11px] text-amber-300">Add at least one &quot;Done when&quot; criterion — agents are graded on these.</p>
+      ) : criteriaMissing ? (
+        <p className="text-[11px] text-amber-300">Each criterion should be on its own line.</p>
+      ) : null}
       {create.isError ? <p className="text-xs text-red-400">{(create.error as Error).message}</p> : null}
       {create.isSuccess ? (
         <p className="text-xs text-bai-orange">
@@ -1475,6 +1542,12 @@ const STAGES: { key: TaskStage; label: string; tone: string }[] = [
   { key: "done", label: "Done", tone: "border-bai-line" },
 ];
 
+function activeRunForTask(runs: AgentRun[] | undefined, repo: string, issueNumber: number): AgentRun | undefined {
+  return runs?.find(
+    (r) => r.repo === repo && r.issueNumber === issueNumber && r.status === "running" && r.source === "dispatch"
+  );
+}
+
 function TaskCard({
   task,
   repo,
@@ -1484,6 +1557,7 @@ function TaskCard({
   budget,
   provider,
   providers,
+  activeRun,
   onLogRun,
 }: {
   task: TaskIssue;
@@ -1494,6 +1568,7 @@ function TaskCard({
   budget?: ProjectBudgetStatus;
   provider: AgentProviderId;
   providers: AgentProvider[];
+  activeRun?: AgentRun;
   onLogRun: (prefill: { projectId: string; issueNumber: number; title: string; provider: AgentProviderId }) => void;
 }) {
   const qc = useQueryClient();
@@ -1501,25 +1576,38 @@ function TaskCard({
   const meta = providers.find((p) => p.id === provider);
 
   const dispatch = useMutation({
-    mutationFn: async () => {
-      const res = await fetch("/api/dispatch", {
+    mutationFn: async () =>
+      apiWrite("/api/dispatch", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           project: projectId,
           issueNumber: task.number,
           title: task.title,
           provider: "claude-code",
         }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error((data as { error?: string }).error || "Dispatch failed");
-      return data;
-    },
+      }),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["board"] });
       void qc.invalidateQueries({ queryKey: ["dispatches"] });
     },
+  });
+
+  const promote = useMutation({
+    mutationFn: async () =>
+      apiWrite("/api/tasks/promote", {
+        method: "POST",
+        body: JSON.stringify({ project: projectId, issueNumber: task.number }),
+      }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["board"] }),
+  });
+
+  const dismiss = useMutation({
+    mutationFn: async () =>
+      apiWrite("/api/tasks/dismiss", {
+        method: "POST",
+        body: JSON.stringify({ project: projectId, issueNumber: task.number }),
+      }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["board"] }),
   });
 
   const readyActions = () => {
@@ -1537,9 +1625,9 @@ function TaskCard({
             type="button"
             disabled={dispatch.isPending || meta?.available === false || budget?.anyExceeded}
             onClick={() => dispatch.mutate()}
-            className="w-full rounded-md border border-bai-orange bg-bai-orange/15 px-2 py-2 text-[11px] font-semibold text-bai-orange hover:bg-bai-orange/25 disabled:opacity-50"
+            className="w-full rounded border border-bai-orange bg-bai-orange/15 px-1.5 py-1 text-[10px] font-semibold text-bai-orange hover:bg-bai-orange/25 disabled:opacity-50"
           >
-            {dispatch.isPending ? "Starting team…" : "▶ Dispatch agent team"}
+            {dispatch.isPending ? "Starting…" : "▶ Dispatch team"}
           </button>
           <button
             type="button"
@@ -1596,8 +1684,8 @@ function TaskCard({
   };
 
   return (
-    <div className="rounded-lg border border-bai-line bg-bai-surface p-2.5 hover:border-bai-mute/50 transition-colors">
-      <div className="mb-2 flex flex-wrap items-center gap-1.5">
+    <div className="rounded-md border border-bai-line bg-bai-surface p-2 hover:border-bai-mute/50 transition-colors">
+      <div className="mb-1.5 flex flex-wrap items-center gap-1">
         <DomainBadge domain={domain} repo={repo} size="xs" />
         {issueSpend && issueSpend.totalUsd > 0 ? (
           <SpendPill amount={issueSpend.totalUsd} label={`${issueSpend.runs} run${issueSpend.runs === 1 ? "" : "s"}`} />
@@ -1605,15 +1693,51 @@ function TaskCard({
         {issueSpend && issueSpend.todayUsd > 0 ? <SpendPill amount={issueSpend.todayUsd} label="today" tone="warn" /> : null}
       </div>
       <a href={task.url} target="_blank" rel="noreferrer" className="block">
-        <p className="text-sm text-bai-fg leading-snug">{task.title}</p>
-        <p className="mt-1 text-[11px] text-bai-mute/80">
+        <p className="text-xs font-medium text-bai-fg leading-snug">{task.title}</p>
+        <p className="mt-0.5 text-[10px] text-bai-mute/80">
           #{task.number}
           {task.priority ? ` · ${task.priority}` : ""}
           {task.assignee ? ` · ${task.assignee}` : ""}
         </p>
+        {task.bodyPreview ? (
+          <p className="mt-1 line-clamp-2 text-[10px] leading-snug text-bai-mute/70">{task.bodyPreview}</p>
+        ) : null}
       </a>
+      {activeRun ? (
+        <p className="mt-1.5 rounded border border-bai-orange/30 bg-bai-orange/10 px-1.5 py-0.5 text-[9px] text-bai-orange">
+          Agent running · {activeRun.pipelineStage ?? "pipeline"}
+        </p>
+      ) : null}
+      {PIPELINE_ACTIVE.includes(task.stage) && !activeRun ? (
+        <p className="mt-1.5 text-[9px] text-bai-mute/70">In pipeline — check GitHub</p>
+      ) : null}
+      {task.stage === "agent:idea" ? (
+        <div className="mt-1.5 space-y-1 border-t border-bai-line/60 pt-1.5">
+          <button
+            type="button"
+            disabled={promote.isPending}
+            onClick={() => promote.mutate()}
+            className="w-full rounded border border-lime-400/40 bg-lime-400/10 px-1.5 py-1 text-[10px] font-semibold text-lime-300 hover:bg-lime-400/20 disabled:opacity-50"
+          >
+            {promote.isPending ? "Promoting…" : "↑ Promote"}
+          </button>
+          <button
+            type="button"
+            disabled={dismiss.isPending}
+            onClick={() => {
+              if (!window.confirm(`Dismiss idea #${task.number}? This closes the issue.`)) return;
+              dismiss.mutate();
+            }}
+            className="w-full rounded border border-bai-line px-1.5 py-1 text-[9px] text-bai-mute hover:border-red-400/40 hover:text-red-300"
+          >
+            {dismiss.isPending ? "…" : "Dismiss"}
+          </button>
+          {promote.isError ? <p className="text-[10px] text-red-400">{(promote.error as Error).message}</p> : null}
+          {dismiss.isError ? <p className="text-[10px] text-red-400">{(dismiss.error as Error).message}</p> : null}
+        </div>
+      ) : null}
       {task.stage === "agent:ready" ? (
-        <div className="mt-2 space-y-1.5 border-t border-bai-line/60 pt-2">
+        <div className="mt-1.5 space-y-1 border-t border-bai-line/60 pt-1.5">
           {meta ? (
             <p className="text-[10px] text-bai-mute">
               via <span className={meta.tone}>{meta.shortLabel}</span>
@@ -1650,16 +1774,11 @@ function PrReviewRow({ repo, pr, domain }: { repo: string; pr: ReviewPr; domain?
   });
   const checks = detailQuery.data?.pr.checks;
   const merge = useMutation({
-    mutationFn: async () => {
-      const res = await fetch("/api/prs/merge", {
+    mutationFn: async () =>
+      apiWrite<{ domain?: string | null; message?: string }>("/api/prs/merge", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ repo, number: pr.number }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error((data as { error?: string }).error || "Merge failed");
-      return data as { domain?: string | null; message?: string };
-    },
+      }),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["board"] });
     },
@@ -1746,7 +1865,7 @@ function PortfolioOverview({
             key={board.project.id}
             type="button"
             onClick={() => onSelectProject?.(board.project.id)}
-            className={`rounded-lg border p-3 text-left transition-colors ${
+            className={`rounded-md border p-2.5 text-left transition-colors ${
               budget?.anyExceeded
                 ? "border-red-500/50 bg-red-500/5 hover:border-red-500/70"
                 : board.prs.length > 0
@@ -1787,6 +1906,7 @@ function PortfolioOverview({
               <p className="mt-1.5 text-[11px] text-bai-mute/60">quiet</p>
             ) : (
               <p className="mt-1.5 flex gap-2.5 text-[11px] tabular-nums">
+                <span className="text-lime-300">{count("agent:idea")} ideas</span>
                 <span className="text-bai-orange">{count("agent:ready")} ready</span>
                 <span className="text-bai-metal">
                   {PIPELINE_ACTIVE.reduce((n, s) => n + count(s), 0)} in pipeline
@@ -1807,6 +1927,7 @@ function ProjectBoard({
   provider,
   providers,
   spend,
+  dispatches,
   onLogRun,
   showHeader = true,
 }: {
@@ -1814,6 +1935,7 @@ function ProjectBoard({
   provider: AgentProviderId;
   providers: AgentProvider[];
   spend?: SpendSummary;
+  dispatches?: AgentRun[];
   onLogRun: (prefill: { projectId: string; issueNumber: number; title: string; provider: AgentProviderId }) => void;
   showHeader?: boolean;
 }) {
@@ -1872,15 +1994,18 @@ function ProjectBoard({
         </div>
       ) : null}
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        {!showHeader ? (
-          <p className="col-span-full text-xs font-medium uppercase tracking-wider text-bai-mute">Task board</p>
-        ) : null}
+      {!showHeader ? (
+        <p className="text-[10px] font-medium uppercase tracking-wider text-bai-mute">Task board</p>
+      ) : null}
+      <div className="scroll-hidden flex gap-2 overflow-x-auto pb-1">
         {STAGES.map((stage) => {
           const tasks = board.tasks.filter((t) => t.stage === stage.key);
           return (
-            <div key={stage.key} className={`rounded-lg border-t-2 ${stage.tone} bg-bai-bg p-2 space-y-2`}>
-              <p className="px-1 text-xs font-semibold uppercase tracking-wider text-bai-mute">
+            <div
+              key={stage.key}
+              className={`w-[9.5rem] shrink-0 rounded-md border-t-2 ${stage.tone} bg-bai-bg p-1.5 space-y-1.5`}
+            >
+              <p className="px-0.5 text-[10px] font-semibold uppercase tracking-wider text-bai-mute">
                 {stage.label} <span className="text-bai-mute/60">{tasks.length}</span>
               </p>
               {tasks.map((task) => (
@@ -1894,10 +2019,11 @@ function ProjectBoard({
                   budget={budget}
                   provider={provider}
                   providers={providers}
+                  activeRun={activeRunForTask(dispatches, board.project.repo, task.number)}
                   onLogRun={onLogRun}
                 />
               ))}
-              {tasks.length === 0 ? <p className="px-1 pb-1 text-[11px] text-bai-mute/60">—</p> : null}
+              {tasks.length === 0 ? <p className="px-0.5 pb-0.5 text-[10px] text-bai-mute/60">—</p> : null}
             </div>
           );
         })}
@@ -1994,7 +2120,7 @@ function DashboardView({
 }: {
   boards: Board[];
   spend?: SpendSummary;
-  totals: { ready: number; pipeline: number; review: number; prs: number };
+  totals: { ready: number; pipeline: number; review: number; prs: number; ideas: number };
   onOpenProject: (projectId: string) => void;
   onOpenProjects: () => void;
   onOpenNewTask: (projectId?: string) => void;
@@ -2003,15 +2129,19 @@ function DashboardView({
   const readyQueue = boards.flatMap((b) =>
     b.tasks.filter((t) => t.stage === "agent:ready").map((task) => ({ board: b, task }))
   );
+  const ideasQueue = boards.flatMap((b) =>
+    b.tasks.filter((t) => t.stage === "agent:idea").map((task) => ({ board: b, task }))
+  );
   const quietCount = boards.filter(isQuiet).length;
 
   return (
     <div className="mx-auto max-w-6xl space-y-8">
       <WorkflowStrip />
 
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
         <StatCard label="Awaiting review" value={totals.prs} tone={totals.prs > 0 ? "accent" : "default"} />
         <StatCard label="Ready for agents" value={totals.ready} tone={totals.ready > 0 ? "warn" : "default"} />
+        <StatCard label="Ideas to review" value={totals.ideas} tone={totals.ideas > 0 ? "warn" : "default"} />
         <StatCard label="In pipeline" value={totals.pipeline} />
         <StatCard label="Spend today" value={spend ? usd(spend.todayUsd) : "$0.00"} />
       </div>
@@ -2020,9 +2150,9 @@ function DashboardView({
         <div className="flex items-end justify-between gap-3">
           <div>
             <h3 className="text-base font-semibold text-bai-fg">Needs your attention</h3>
-            <p className="text-xs text-bai-mute">Approve PRs or dispatch agents on ready tasks.</p>
+            <p className="text-xs text-bai-mute">Approve PRs, review ideas, or dispatch agents on ready tasks.</p>
           </div>
-          {reviewQueue.length + readyQueue.length > 0 ? (
+          {reviewQueue.length + readyQueue.length + ideasQueue.length > 0 ? (
             <button
               type="button"
               onClick={onOpenProjects}
@@ -2033,7 +2163,7 @@ function DashboardView({
           ) : null}
         </div>
 
-        {reviewQueue.length === 0 && readyQueue.length === 0 ? (
+        {reviewQueue.length === 0 && readyQueue.length === 0 && ideasQueue.length === 0 ? (
           <div className="rounded-xl border border-bai-line/80 bg-bai-surface/20 px-4 py-8 text-center">
             <p className="text-sm text-bai-fg">All clear — nothing waiting on you.</p>
             <button
@@ -2069,8 +2199,40 @@ function DashboardView({
               </div>
             ) : null}
 
+            {ideasQueue.length > 0 ? (
+              <div className="rounded-lg border border-lime-400/30 bg-lime-400/5 p-3 space-y-2">
+                <p className="text-xs font-semibold uppercase tracking-wider text-lime-300">
+                  {ideasQueue.length} idea{ideasQueue.length === 1 ? "" : "s"} to review
+                </p>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {ideasQueue.slice(0, 4).map(({ board, task }) => (
+                    <button
+                      key={`${board.project.id}-${task.number}`}
+                      type="button"
+                      onClick={() => onOpenProject(board.project.id)}
+                      className="rounded-md border border-bai-line bg-bai-bg/60 p-2.5 text-left hover:border-lime-400/40"
+                    >
+                      <div className="mb-1">
+                        <DomainBadge domain={board.project.domain} repo={board.project.repo} size="xs" />
+                      </div>
+                      <p className="text-sm text-bai-fg line-clamp-2">{task.title}</p>
+                      {task.bodyPreview ? (
+                        <p className="mt-1 line-clamp-2 text-[11px] text-bai-mute/70">{task.bodyPreview}</p>
+                      ) : null}
+                      <p className="mt-1 text-[11px] text-bai-mute">#{task.number} · {board.project.name}</p>
+                    </button>
+                  ))}
+                </div>
+                {ideasQueue.length > 4 ? (
+                  <button type="button" onClick={onOpenProjects} className="text-xs text-lime-300">
+                    + {ideasQueue.length - 4} more in Projects
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+
             {readyQueue.length > 0 ? (
-              <div className="rounded-xl border border-bai-line bg-bai-surface/20 p-4 space-y-2">
+              <div className="rounded-lg border border-bai-line bg-bai-surface/20 p-3 space-y-2">
                 <p className="text-xs font-semibold uppercase tracking-wider text-bai-mute">
                   {readyQueue.length} task{readyQueue.length === 1 ? "" : "s"} ready for agents
                 </p>
@@ -2080,7 +2242,7 @@ function DashboardView({
                       key={`${board.project.id}-${task.number}`}
                       type="button"
                       onClick={() => onOpenProject(board.project.id)}
-                      className="rounded-lg border border-bai-line bg-bai-bg/60 p-3 text-left hover:border-bai-orange/50"
+                      className="rounded-md border border-bai-line bg-bai-bg/60 p-2.5 text-left hover:border-bai-orange/50"
                     >
                       <div className="mb-1">
                         <DomainBadge domain={board.project.domain} repo={board.project.repo} size="xs" />
@@ -2137,6 +2299,7 @@ function ProjectListItem({
   spend?: SpendSummary;
 }) {
   const ready = board.tasks.filter((t) => t.stage === "agent:ready").length;
+  const ideas = board.tasks.filter((t) => t.stage === "agent:idea").length;
   const pipeline = pipelineTaskCount(board);
   const quiet = isQuiet(board);
   const budget = projectBudget(spend, board.project.id);
@@ -2145,7 +2308,7 @@ function ProjectListItem({
     <button
       type="button"
       onClick={onClick}
-      className={`w-full rounded-lg border px-3 py-2.5 text-left transition-colors ${
+      className={`w-full rounded-md border px-2.5 py-2 text-left transition-colors ${
         active
           ? "border-bai-orange/60 bg-bai-orange/10"
           : quiet
@@ -2169,6 +2332,7 @@ function ProjectListItem({
           <span className="text-bai-mute/60">quiet</span>
         ) : (
           <>
+            {ideas > 0 ? <span className="text-lime-300">{ideas} ideas</span> : null}
             {ready > 0 ? <span className="text-bai-orange">{ready} ready</span> : null}
             {pipeline > 0 ? <span className="text-bai-metal">{pipeline} in pipeline</span> : null}
           </>
@@ -2186,6 +2350,7 @@ function ProjectsView({
   provider,
   providers,
   spend,
+  dispatches,
   onLogRun,
   onNewTask,
 }: {
@@ -2195,6 +2360,7 @@ function ProjectsView({
   provider: AgentProviderId;
   providers: AgentProvider[];
   spend?: SpendSummary;
+  dispatches?: AgentRun[];
   onLogRun: (prefill: { projectId: string; issueNumber: number; title: string; provider: AgentProviderId }) => void;
   onNewTask: (projectId: string) => void;
 }) {
@@ -2236,22 +2402,22 @@ function ProjectsView({
   );
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-4 lg:flex-row lg:gap-6">
-      <aside className="flex max-h-56 shrink-0 flex-col min-h-0 border-b border-bai-line pb-4 lg:max-h-none lg:w-72 lg:shrink-0 lg:border-b-0 lg:border-r lg:pr-4">
-        <div className="shrink-0 space-y-3 pb-3">
+    <div className="flex flex-col gap-3 lg:flex-row lg:gap-5">
+      <aside className="shrink-0 border-b border-bai-line pb-3 lg:w-52 lg:border-b-0 lg:border-r lg:pb-0 lg:pr-3">
+        <div className="shrink-0 space-y-2 pb-2">
           <input
-            className={INPUT_CLS}
-            placeholder="Search by name, domain, repo…"
+            className={`${INPUT_CLS} py-1.5 text-xs`}
+            placeholder="Search projects…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
-          <div className="flex flex-wrap gap-1.5">
+          <div className="flex flex-wrap gap-1">
             {filterBtn("all", "All", boards.length)}
             {filterBtn("active", "Active", boards.filter((b) => !isQuiet(b)).length)}
             {filterBtn("quiet", "Quiet", boards.filter(isQuiet).length)}
           </div>
         </div>
-        <div className="min-h-0 flex-1 space-y-1.5 overflow-y-auto pr-1">
+        <div className="space-y-1">
           {filtered.map((board) => (
             <ProjectListItem
               key={board.project.id}
@@ -2267,13 +2433,13 @@ function ProjectsView({
         </div>
       </aside>
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="min-w-0 flex-1">
         {selected ? (
           <>
-            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
-                  <h3 className="text-lg font-semibold text-bai-fg">{selected.project.name}</h3>
+                  <h3 className="text-base font-semibold text-bai-fg">{selected.project.name}</h3>
                   <DomainBadge domain={selected.project.domain} repo={selected.project.repo} size="xs" />
                 </div>
                 <a
@@ -2313,6 +2479,7 @@ function ProjectsView({
                 provider={provider}
                 providers={providers}
                 spend={spend}
+                dispatches={dispatches}
                 onLogRun={onLogRun}
                 showHeader={false}
               />
@@ -2384,20 +2551,22 @@ function BaiDigitalOffice() {
   const boards = boardQuery.data?.boards ?? [];
   const activeBoards = boards.filter((b) => !isQuiet(b));
   const spend = spendQuery.data?.spend;
+  const dispatches = spendQuery.data?.dispatches ?? [];
   const totals = boards.reduce(
     (acc, b) => {
       for (const t of b.tasks) {
         if (t.stage === "agent:ready") acc.ready += 1;
+        else if (t.stage === "agent:idea") acc.ideas += 1;
         else if (PIPELINE_ACTIVE.includes(t.stage)) acc.pipeline += 1;
         else if (t.stage === "agent:review") acc.review += 1;
       }
       acc.prs += b.prs.length;
       return acc;
     },
-    { ready: 0, pipeline: 0, review: 0, prs: 0 }
+    { ready: 0, pipeline: 0, review: 0, prs: 0, ideas: 0 }
   );
 
-  const attentionCount = totals.prs + totals.ready;
+  const attentionCount = totals.prs + totals.ready + totals.ideas;
 
   const openProject = (projectId: string) => {
     setSelectedProjectId(projectId);
@@ -2474,7 +2643,7 @@ function BaiDigitalOffice() {
           </div>
         </div>
 
-        <nav className="mx-auto flex max-w-7xl gap-4 overflow-x-auto px-4 sm:gap-6 sm:px-6" role="tablist" aria-label="Office sections">
+        <nav className="scroll-hidden mx-auto flex max-w-7xl gap-4 overflow-x-auto px-4 sm:gap-6 sm:px-6" role="tablist" aria-label="Office sections">
           {(Object.keys(TAB_META) as OfficeTab[]).map((id) => (
             <TabButton
               key={id}
@@ -2493,11 +2662,9 @@ function BaiDigitalOffice() {
         </nav>
       </header>
 
-      <main
-        className={`mx-auto min-h-0 w-full max-w-7xl flex-1 px-4 py-6 sm:px-6 ${
-          tab === "projects" ? "flex flex-col overflow-hidden" : "overflow-y-auto"
-        }`}
-      >
+      <SystemHealthBar />
+
+      <main className="mx-auto min-h-0 w-full max-w-7xl flex-1 overflow-y-auto scroll-subtle px-4 py-4 sm:px-6 sm:py-5">
         {tab !== "dashboard" ? (
           <PageHeader title={TAB_META[tab].label} description={TAB_META[tab].hint} />
         ) : null}
@@ -2534,6 +2701,7 @@ function BaiDigitalOffice() {
               provider={provider}
               providers={providers}
               spend={spend}
+              dispatches={dispatches}
               onLogRun={openSettingsForLog}
               onNewTask={openNewTask}
             />
@@ -2572,6 +2740,7 @@ function BaiDigitalOffice() {
 
         {tab === "settings" ? (
           <div className="mx-auto max-w-3xl space-y-10">
+            <WriteSecretSettings />
             <section>
               <h3 className="mb-1 text-sm font-semibold text-bai-fg">All agents</h3>
               <p className="mb-4 text-xs text-bai-mute">

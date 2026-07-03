@@ -27,6 +27,8 @@ import {
   createTask,
   getPullRequestDetail,
   mergePullRequest,
+  promoteIdeaToReady,
+  dismissIdea,
 } from "./lib/github.ts";
 import { agentCatalog } from "./lib/agents.ts";
 import {
@@ -37,6 +39,7 @@ import {
   resetSpecialistAgent,
   setAgentTeamConfig,
   isSpecialistAgentId,
+  exportAgentTeamConfigForWorker,
   SUGGESTED_MODELS,
   type PipelineStageId,
   type StageSettings,
@@ -53,7 +56,7 @@ import {
 } from "./lib/dispatch.ts";
 import { startAgentPoller } from "./lib/agentPoller.ts";
 import { requireWriteAuth } from "./lib/auth.ts";
-import { notifyWorkerPoll, notifyWorkerSpecialist } from "./lib/workerWebhook.ts";
+import { notifyWorkerPoll, notifyWorkerSpecialist, notifyWorkerConfig, workerConfigured } from "./lib/workerWebhook.ts";
 
 dotenv.config({ path: [".env.local", ".env"] });
 
@@ -66,19 +69,26 @@ app.get("/api/health", (_req, res) => {
     ok: true,
     github: githubConfigured(),
     dispatch: dispatchAvailable(),
+    worker: workerConfigured(),
     runningAgents: runningDispatchCount(),
     autoPoll: process.env.AGENT_POLL_ENABLED === "true",
+    writeAuthRequired: Boolean(String(process.env.OFFICE_SECRET || "").trim()),
   });
 });
 
 app.get("/api/projects", (_req, res) => {
-  res.json({ projects: PROJECTS, github: githubConfigured(), dispatch: dispatchAvailable() });
+  res.json({
+    projects: PROJECTS,
+    github: githubConfigured(),
+    dispatch: dispatchAvailable(),
+    worker: workerConfigured(),
+  });
 });
 
 app.get("/api/agents", (_req, res) => {
   const config = readAgentTeamConfig();
   res.json({
-    providers: agentCatalog(dispatchAvailable()),
+    providers: agentCatalog({ dispatchEnabled: dispatchAvailable(), workerConfigured: workerConfigured() }),
     team: listPipelineAgentViews(),
     specialists: listSpecialistAgentViews(),
     suggestedModels: SUGGESTED_MODELS,
@@ -97,6 +107,7 @@ app.put("/api/agent-team", requireWriteAuth, (req, res) => {
   }
   try {
     const config = setAgentTeamConfig({ stages, specialists });
+    void notifyWorkerConfig(exportAgentTeamConfigForWorker());
     res.json({
       ok: true,
       team: listPipelineAgentViews(),
@@ -276,6 +287,39 @@ app.post("/api/dispatch", requireWriteAuth, async (req, res) => {
     return res.status(dispatch.status).json({ error: dispatch.error });
   }
   res.json({ ok: true, dispatch: dispatch.dispatch });
+});
+
+/** Promote agent:idea → agent:ready (build queue). */
+app.post("/api/tasks/promote", requireWriteAuth, async (req, res) => {
+  if (!githubConfigured()) {
+    return res.status(503).json({ error: "GITHUB_TOKEN is not set." });
+  }
+  const project = findProject(String(req.body?.project || ""));
+  const issueNumber = Number(req.body?.issueNumber);
+  if (!project) return res.status(400).json({ error: "Unknown project." });
+  if (!Number.isInteger(issueNumber) || issueNumber < 1) {
+    return res.status(400).json({ error: "issueNumber is required." });
+  }
+  const result = await promoteIdeaToReady(project.repo, issueNumber);
+  if (!result.ok) return res.status(result.status).json({ error: result.message });
+  void notifyWorkerPoll("idea-promoted");
+  res.json({ ok: true, message: "Idea promoted to agent:ready." });
+});
+
+/** Dismiss an agent:idea (close issue). */
+app.post("/api/tasks/dismiss", requireWriteAuth, async (req, res) => {
+  if (!githubConfigured()) {
+    return res.status(503).json({ error: "GITHUB_TOKEN is not set." });
+  }
+  const project = findProject(String(req.body?.project || ""));
+  const issueNumber = Number(req.body?.issueNumber);
+  if (!project) return res.status(400).json({ error: "Unknown project." });
+  if (!Number.isInteger(issueNumber) || issueNumber < 1) {
+    return res.status(400).json({ error: "issueNumber is required." });
+  }
+  const result = await dismissIdea(project.repo, issueNumber);
+  if (!result.ok) return res.status(result.status).json({ error: result.message });
+  res.json({ ok: true, message: "Idea dismissed." });
 });
 
 app.get("/api/prs/detail", async (req, res) => {

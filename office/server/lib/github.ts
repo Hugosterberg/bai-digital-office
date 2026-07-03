@@ -355,3 +355,44 @@ export async function commentOnIssue(
     body: JSON.stringify({ body }),
   });
 }
+
+/** Promote a growth/research idea to the build queue. */
+export async function promoteIdeaToReady(
+  repo: string,
+  issueNumber: number
+): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
+  const view = await gh(`/repos/${repo}/issues/${issueNumber}`);
+  if (!view.ok) return { ok: false, status: 404, message: "Issue not found." };
+  const labels = ((view.data as Record<string, unknown>).labels as Array<{ name?: string }> | undefined) ?? [];
+  const names = labels.map((l) => String(l.name || ""));
+  if (!names.includes("agent:idea")) {
+    return { ok: false, status: 409, message: "Issue is not an agent:idea — only ideas can be promoted." };
+  }
+  const result = await setIssueStage(repo, issueNumber, "agent:ready");
+  if (!result.ok) return { ok: false, status: 502, message: result.message };
+  await commentOnIssue(
+    repo,
+    issueNumber,
+    "Promoted to **agent:ready** from office — the agent team will pick this up for analyze → implement → validate."
+  );
+  return { ok: true };
+}
+
+/** Close an idea without building it. */
+export async function dismissIdea(
+  repo: string,
+  issueNumber: number
+): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
+  const res = await gh(`/repos/${repo}/issues/${issueNumber}`, {
+    method: "PATCH",
+    body: JSON.stringify({ state: "closed" }),
+  });
+  if (!res.ok) {
+    return {
+      ok: false,
+      status: res.status,
+      message: String((res.data as Record<string, unknown> | null)?.message || "Could not dismiss idea."),
+    };
+  }
+  return { ok: true };
+}

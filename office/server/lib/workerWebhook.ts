@@ -22,6 +22,16 @@ export async function notifyWorkerSpecialist(input: {
   return postWorker(url, input);
 }
 
+export function workerConfigured(): boolean {
+  return Boolean(String(process.env.WORKER_WEBHOOK_URL || "").trim());
+}
+
+export async function notifyWorkerConfig(config: unknown): Promise<{ ok: boolean; skipped?: string }> {
+  const base = workerBaseUrl();
+  if (!base) return { ok: false, skipped: "WORKER_WEBHOOK_URL not set" };
+  return postWorker(`${base}/config`, config);
+}
+
 function workerBaseUrl(): string {
   const raw = String(process.env.WORKER_WEBHOOK_URL || "").trim().replace(/\/$/, "");
   if (!raw) return "";
