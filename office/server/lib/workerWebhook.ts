@@ -4,11 +4,31 @@
  */
 
 export async function notifyWorkerPoll(reason = "task"): Promise<{ ok: boolean; skipped?: string }> {
-  const base = String(process.env.WORKER_WEBHOOK_URL || "").trim().replace(/\/$/, "");
-  if (!base) {
-    return { ok: false, skipped: "WORKER_WEBHOOK_URL not set" };
-  }
-  const url = base.endsWith("/poll") ? base : `${base}/poll`;
+  const base = workerBaseUrl();
+  if (!base) return { ok: false, skipped: "WORKER_WEBHOOK_URL not set" };
+  const url = `${base}/poll`;
+  return postWorker(url, { reason });
+}
+
+export async function notifyWorkerSpecialist(input: {
+  id: "growth" | "research";
+  project: string;
+  focus?: string;
+  ideaCount?: number;
+}): Promise<{ ok: boolean; skipped?: string }> {
+  const base = workerBaseUrl();
+  if (!base) return { ok: false, skipped: "WORKER_WEBHOOK_URL not set" };
+  const url = `${base}/specialist/${input.id}`;
+  return postWorker(url, input);
+}
+
+function workerBaseUrl(): string {
+  const raw = String(process.env.WORKER_WEBHOOK_URL || "").trim().replace(/\/$/, "");
+  if (!raw) return "";
+  return raw.endsWith("/poll") ? raw.slice(0, -"/poll".length) : raw;
+}
+
+async function postWorker(url: string, body: unknown): Promise<{ ok: boolean }> {
   const secret = String(process.env.WORKER_SECRET || "").trim();
   try {
     const res = await fetch(url, {
@@ -17,7 +37,7 @@ export async function notifyWorkerPoll(reason = "task"): Promise<{ ok: boolean; 
         ...(secret ? { Authorization: `Bearer ${secret}` } : {}),
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ reason }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(8_000),
     });
     if (!res.ok) {

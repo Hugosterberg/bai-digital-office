@@ -12,7 +12,7 @@ const TAB_META: Record<OfficeTab, { label: string; hint: string }> = {
   projects: { label: "Projects", hint: "Pick a product, review its kanban, and merge PRs to production." },
   "new-task": { label: "Create", hint: "Describe the work — it becomes a GitHub issue for agents to pick up." },
   spend: { label: "Spend", hint: "Track agent cost by project, provider, and issue." },
-  settings: { label: "Settings", hint: "Choose your default agent, log manual runs, and set budget caps." },
+  settings: { label: "Settings", hint: "Configure the agent team, default provider, budgets, and manual run logs." },
 };
 
 /* ── types ──────────────────────────────────────────────────── */
@@ -24,11 +24,20 @@ interface Project {
   domain?: string;
 }
 
+type TaskStage =
+  | "agent:idea"
+  | "agent:ready"
+  | "agent:analyzing"
+  | "agent:implementing"
+  | "agent:validating"
+  | "agent:review"
+  | "done";
+
 interface TaskIssue {
   number: number;
   title: string;
   url: string;
-  stage: "agent:ready" | "agent:building" | "agent:review" | "done";
+  stage: TaskStage;
   priority: string | null;
   updatedAt: string;
   assignee: string | null;
@@ -70,6 +79,39 @@ interface AgentProvider {
   unavailableReason?: string;
 }
 
+interface PipelineAgent {
+  id: "analyze" | "implement" | "validate";
+  title: string;
+  role: string;
+  model: string;
+  enabled: boolean;
+  stageLabel: string;
+  docsPath: string;
+  order: number;
+  defaults: { enabled: boolean; model: string; role: string; title: string };
+}
+
+interface SpecialistAgent {
+  id: "growth" | "research";
+  title: string;
+  role: string;
+  model: string;
+  enabled: boolean;
+  docsPath: string;
+  description: string;
+  order: number;
+  defaults: { enabled: boolean; model: string; role: string; title: string };
+}
+
+interface AgentsResponse {
+  providers: AgentProvider[];
+  team: PipelineAgent[];
+  specialists: SpecialistAgent[];
+  suggestedModels: string[];
+  teamUpdatedAt?: string;
+  defaultProvider: AgentProviderId;
+}
+
 interface AgentRun {
   id: string;
   provider: AgentProviderId;
@@ -82,6 +124,8 @@ interface AgentRun {
   costUsd?: number;
   durationMs?: number;
   source: "dispatch" | "manual";
+  pipelineStage?: "analyze" | "implement" | "validate";
+  pipelineId?: string;
   notes?: string;
   projectId?: string;
   projectName?: string;
@@ -158,7 +202,9 @@ function PageHeader({ title, description }: { title: string; description?: strin
 function WorkflowStrip() {
   const steps = [
     { label: "Create task", sub: "GitHub issue" },
-    { label: "Agent builds", sub: "PR on feat/" },
+    { label: "Analyze", sub: "Sonnet" },
+    { label: "Implement", sub: "Opus" },
+    { label: "Validate", sub: "Sonnet + PR" },
     { label: "You review", sub: "CI + diff" },
     { label: "Approve", sub: "Ships to prod" },
   ];
@@ -463,30 +509,394 @@ function ProjectBudgetsEditor({
 }
 
 function claudeHeadlessCommand(repo: string, issueNumber: number): string {
-  return `claude -p "Execute GitHub issue #${issueNumber} in ${repo} per the BAI agent contract in its body: read it with gh issue view ${issueNumber} --repo ${repo}, label agent:building, clone, build on a feat/ branch, run the repo's verify scripts until green, push, open a PR with Closes #${issueNumber}, then label agent:review. Never push to main or merge." --permission-mode acceptEdits --allowedTools "Bash(git:*),Bash(gh:*),Bash(npm:*),Bash(npx:*),Bash(node:*),Edit,Write,Read,Glob,Grep"`;
+  return `claude -p "Execute GitHub issue #${issueNumber} in ${repo} using the BAI three-agent team: (1) analyze — explore repo, post analysis comment, (2) implement — feat/ branch and push, (3) validate — verify green, open PR with Closes #${issueNumber}, label agent:review. Follow AGENTS.md + ai/. Never push to main or merge." --permission-mode acceptEdits --allowedTools "Bash(git:*),Bash(gh:*),Bash(npm:*),Bash(npx:*),Bash(node:*),Edit,Write,Read,Glob,Grep"`;
 }
 
 function claudeInteractiveCommand(repo: string, issueNumber: number): string {
   const prompt = [
-    `Execute GitHub issue #${issueNumber} in ${repo} per the BAI agent contract:`,
-    `gh issue view ${issueNumber} --repo ${repo}, label agent:building, feat/ branch, verify green,`,
-    `PR with Closes #${issueNumber}, label agent:review. Never push to main.`,
+    `Execute GitHub issue #${issueNumber} in ${repo} via BAI agent team:`,
+    `analyze (plan comment) → implement (feat/ branch) → validate (verify + PR, Closes #${issueNumber}, agent:review).`,
+    `Never push to main.`,
   ].join(" ");
   return `claude "${prompt.replace(/"/g, '\\"')}" --permission-mode acceptEdits`;
 }
 
 function cursorPrompt(repo: string, issueNumber: number): string {
   return [
-    `Execute GitHub issue #${issueNumber} in ${repo} per the BAI agent contract in the issue body.`,
-    `Label agent:building, build on feat/<slug>, run verify until green, open PR with Closes #${issueNumber}, label agent:review.`,
+    `Execute GitHub issue #${issueNumber} in ${repo} using the BAI three-agent team workflow in the issue body.`,
+    `Analyze → implement on feat/<slug> → validate (verify green, PR with Closes #${issueNumber}, agent:review).`,
     `Never push to main or merge.`,
   ].join("\n");
+}
+
+const PIPELINE_ACTIVE: TaskStage[] = ["agent:analyzing", "agent:implementing", "agent:validating"];
+
+function pipelineTaskCount(board: Board): number {
+  return board.tasks.filter((t) => PIPELINE_ACTIVE.includes(t.stage)).length;
 }
 
 function copyText(text: string, setCopied: (v: boolean) => void): void {
   void navigator.clipboard.writeText(text);
   setCopied(true);
   setTimeout(() => setCopied(false), 2000);
+}
+
+/* ── agent config (pipeline + specialists) ─────────────────── */
+
+const TEAM_TONE: Record<PipelineAgent["id"], string> = {
+  analyze: "text-sky-400",
+  implement: "text-amber-400",
+  validate: "text-violet-400",
+};
+
+const SPECIALIST_TONE: Record<SpecialistAgent["id"], string> = {
+  growth: "text-emerald-400",
+  research: "text-cyan-400",
+};
+
+type AgentSettingsDraft = {
+  enabled: boolean;
+  model: string;
+  role: string;
+  title: string;
+};
+
+type PipelineDraft = Partial<Record<PipelineAgent["id"], AgentSettingsDraft>>;
+type SpecialistDraft = Partial<Record<SpecialistAgent["id"], AgentSettingsDraft>>;
+
+function AgentSettingsCard({
+  title,
+  tone,
+  badge,
+  description,
+  draft,
+  defaults,
+  onPatch,
+  onReset,
+  resetPending,
+}: {
+  title: string;
+  tone: string;
+  badge?: string;
+  description?: string;
+  draft: AgentSettingsDraft;
+  defaults: AgentSettingsDraft;
+  onPatch: (patch: Partial<AgentSettingsDraft>) => void;
+  onReset: () => void;
+  resetPending: boolean;
+}) {
+  return (
+    <article className="rounded-lg border border-bai-line bg-bai-surface/40 p-4 space-y-3">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className={`text-sm font-semibold ${tone}`}>{title}</span>
+            {badge ? (
+              <span className="rounded-full bg-bai-bg px-2 py-0.5 text-[10px] text-bai-mute">{badge}</span>
+            ) : null}
+            {!draft.enabled ? (
+              <span className="rounded-full bg-bai-line/80 px-2 py-0.5 text-[10px] text-bai-mute">disabled</span>
+            ) : null}
+          </div>
+          {description ? <p className="mt-1 text-[11px] text-bai-mute">{description}</p> : null}
+          <p className="mt-1 text-[11px] text-bai-mute/90">{draft.role}</p>
+        </div>
+        <label className="flex items-center gap-2 text-xs text-bai-mute">
+          <input
+            type="checkbox"
+            checked={draft.enabled}
+            onChange={(e) => onPatch({ enabled: e.target.checked })}
+            className="rounded border-bai-line"
+          />
+          Enabled
+        </label>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="block space-y-1">
+          <span className="text-[10px] font-medium uppercase tracking-wider text-bai-mute">Display name</span>
+          <input className={INPUT_CLS} value={draft.title} onChange={(e) => onPatch({ title: e.target.value })} />
+        </label>
+        <label className="block space-y-1">
+          <span className="text-[10px] font-medium uppercase tracking-wider text-bai-mute">Model</span>
+          <input
+            className={INPUT_CLS}
+            value={draft.model}
+            list="agent-model-suggestions"
+            onChange={(e) => onPatch({ model: e.target.value })}
+          />
+        </label>
+        <label className="block space-y-1 sm:col-span-2">
+          <span className="text-[10px] font-medium uppercase tracking-wider text-bai-mute">Persona / role</span>
+          <input className={INPUT_CLS} value={draft.role} onChange={(e) => onPatch({ role: e.target.value })} />
+        </label>
+      </div>
+      <div className="flex flex-wrap items-center gap-3 text-[10px] text-bai-mute/80">
+        <span>Default model: {defaults.model}</span>
+        <button
+          type="button"
+          disabled={resetPending}
+          onClick={onReset}
+          className="text-bai-orange hover:underline disabled:opacity-50"
+        >
+          Reset to defaults
+        </button>
+      </div>
+    </article>
+  );
+}
+
+function AgentConfigEditor() {
+  const qc = useQueryClient();
+  const query = useQuery({
+    queryKey: ["agents"],
+    queryFn: () => getJson<AgentsResponse>("/api/agents"),
+  });
+  const team = query.data?.team;
+  const specialists = query.data?.specialists;
+  const suggestedModels = query.data?.suggestedModels ?? [];
+
+  const [pipelineDraft, setPipelineDraft] = useState<PipelineDraft>({});
+  const [specialistDraft, setSpecialistDraft] = useState<SpecialistDraft>({});
+
+  useEffect(() => {
+    if (!team?.length) return;
+    setPipelineDraft(
+      Object.fromEntries(
+        team.map((a) => [a.id, { enabled: a.enabled, model: a.model, role: a.role, title: a.title }])
+      ) as PipelineDraft
+    );
+  }, [team]);
+
+  useEffect(() => {
+    if (!specialists?.length) return;
+    setSpecialistDraft(
+      Object.fromEntries(
+        specialists.map((a) => [a.id, { enabled: a.enabled, model: a.model, role: a.role, title: a.title }])
+      ) as SpecialistDraft
+    );
+  }, [specialists]);
+
+  const teamList = team ?? [];
+  const specialistList = specialists ?? [];
+
+  const settingsDirty = (saved: { id: string; enabled: boolean; model: string; role: string; title: string }[], draft: Record<string, AgentSettingsDraft | undefined>) =>
+    saved.some((agent) => {
+      const d = draft[agent.id];
+      if (!d) return false;
+      return d.enabled !== agent.enabled || d.model !== agent.model || d.role !== agent.role || d.title !== agent.title;
+    });
+
+  const dirty = settingsDirty(teamList, pipelineDraft) || settingsDirty(specialistList, specialistDraft);
+
+  const save = useMutation({
+    mutationFn: async () => {
+      const res = await fetch("/api/agent-team", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ stages: pipelineDraft, specialists: specialistDraft }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error((data as { error?: string }).error || "Could not save agent settings.");
+      return data;
+    },
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["agents"] }),
+  });
+
+  const resetAgent = useMutation({
+    mutationFn: async (id: string) => {
+      const res = await fetch(`/api/agent-team/${id}/reset`, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error((data as { error?: string }).error || "Could not reset agent.");
+      return data;
+    },
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["agents"] }),
+  });
+
+  if (query.isLoading) {
+    return <p className="text-sm text-bai-mute">Loading agents…</p>;
+  }
+
+  return (
+    <div className="space-y-8">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          {query.data?.teamUpdatedAt ? (
+            <p className="text-[10px] text-bai-mute/60">
+              Last saved {new Date(query.data.teamUpdatedAt).toLocaleString()}
+            </p>
+          ) : null}
+        </div>
+        <button
+          type="button"
+          disabled={!dirty || save.isPending}
+          onClick={() => save.mutate()}
+          className="rounded-md border border-bai-orange bg-bai-orange/15 px-3 py-1.5 text-xs font-semibold text-bai-orange hover:bg-bai-orange/25 disabled:opacity-40"
+        >
+          {save.isPending ? "Saving…" : "Save all agent settings"}
+        </button>
+      </div>
+
+      {save.isError ? <p className="text-xs text-red-400">{(save.error as Error).message}</p> : null}
+      {save.isSuccess ? <p className="text-xs text-emerald-400">Agent settings saved.</p> : null}
+
+      <section className="space-y-3">
+        <h4 className="text-xs font-semibold uppercase tracking-wider text-bai-mute">Build pipeline</h4>
+        <p className="text-[11px] text-bai-mute/80">Runs in order on every agent:ready task. Disabled steps are skipped.</p>
+        {teamList.map((agent) => {
+          const d = pipelineDraft[agent.id];
+          if (!d) return null;
+          return (
+            <AgentSettingsCard
+              key={agent.id}
+              title={agent.title}
+              tone={TEAM_TONE[agent.id]}
+              badge={agent.stageLabel}
+              draft={d}
+              defaults={agent.defaults}
+              onPatch={(patch) =>
+                setPipelineDraft((prev) => ({
+                  ...prev,
+                  [agent.id]: { ...d, ...patch },
+                }))
+              }
+              onReset={() => resetAgent.mutate(agent.id)}
+              resetPending={resetAgent.isPending}
+            />
+          );
+        })}
+      </section>
+
+      <section className="space-y-3">
+        <h4 className="text-xs font-semibold uppercase tracking-wider text-bai-mute">Specialist agents</h4>
+        <p className="text-[11px] text-bai-mute/80">On-demand — growth ideas and research scans create agent:idea issues.</p>
+        {specialistList.map((agent) => {
+          const d = specialistDraft[agent.id];
+          if (!d) return null;
+          return (
+            <AgentSettingsCard
+              key={agent.id}
+              title={agent.title}
+              tone={SPECIALIST_TONE[agent.id]}
+              description={agent.description}
+              draft={d}
+              defaults={agent.defaults}
+              onPatch={(patch) =>
+                setSpecialistDraft((prev) => ({
+                  ...prev,
+                  [agent.id]: { ...d, ...patch },
+                }))
+              }
+              onReset={() => resetAgent.mutate(agent.id)}
+              resetPending={resetAgent.isPending}
+            />
+          );
+        })}
+      </section>
+
+      <datalist id="agent-model-suggestions">
+        {suggestedModels.map((model) => (
+          <option key={model} value={model} />
+        ))}
+      </datalist>
+    </div>
+  );
+}
+
+function SpecialistRunPanel({ projects }: { projects: Project[] }) {
+  const qc = useQueryClient();
+  const [project, setProject] = useState(projects[0]?.id ?? "");
+  const [focus, setFocus] = useState("");
+  const [ideaCount, setIdeaCount] = useState("5");
+
+  const runSpecialist = useMutation({
+    mutationFn: async (id: "growth" | "research") => {
+      const res = await fetch(`/api/specialists/${id}/run`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          project,
+          focus: focus.trim(),
+          ideaCount: id === "growth" ? Number(ideaCount) || 5 : undefined,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error((data as { error?: string }).error || "Specialist run failed");
+      return data as { message?: string };
+    },
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["board"] });
+      void qc.invalidateQueries({ queryKey: ["dispatches"] });
+    },
+  });
+
+  if (projects.length === 0) return null;
+
+  return (
+    <section className="rounded-xl border border-emerald-500/25 bg-emerald-500/5 p-4 space-y-3">
+      <div>
+        <h3 className="text-sm font-semibold text-bai-fg">Growth & research</h3>
+        <p className="mt-1 text-xs text-bai-mute">
+          Specialist agents create <span className="text-lime-300">agent:idea</span> issues — review in Ideas, then promote to a build task.
+        </p>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="block space-y-1 sm:col-span-2">
+          <span className="text-[10px] font-medium uppercase tracking-wider text-bai-mute">Project</span>
+          <select className={INPUT_CLS} value={project} onChange={(e) => setProject(e.target.value)}>
+            {projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="block space-y-1 sm:col-span-2">
+          <span className="text-[10px] font-medium uppercase tracking-wider text-bai-mute">Focus (optional)</span>
+          <input
+            className={INPUT_CLS}
+            value={focus}
+            onChange={(e) => setFocus(e.target.value)}
+            placeholder="e.g. retention, SEO, monetization, automation"
+          />
+        </label>
+        <label className="block space-y-1">
+          <span className="text-[10px] font-medium uppercase tracking-wider text-bai-mute">Ideas to generate</span>
+          <input
+            className={INPUT_CLS}
+            type="number"
+            min={1}
+            max={8}
+            value={ideaCount}
+            onChange={(e) => setIdeaCount(e.target.value)}
+          />
+        </label>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          disabled={runSpecialist.isPending || !project}
+          onClick={() => runSpecialist.mutate("growth")}
+          className="rounded-md border border-emerald-500/40 bg-emerald-500/15 px-3 py-2 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/25 disabled:opacity-50"
+        >
+          {runSpecialist.isPending ? "Running…" : "✦ Generate growth ideas"}
+        </button>
+        <button
+          type="button"
+          disabled={runSpecialist.isPending || !project}
+          onClick={() => runSpecialist.mutate("research")}
+          className="rounded-md border border-cyan-500/40 bg-cyan-500/10 px-3 py-2 text-xs font-semibold text-cyan-300 hover:bg-cyan-500/20 disabled:opacity-50"
+        >
+          {runSpecialist.isPending ? "Running…" : "◎ Run research scan"}
+        </button>
+      </div>
+      {runSpecialist.isError ? <p className="text-xs text-red-400">{(runSpecialist.error as Error).message}</p> : null}
+      {runSpecialist.isSuccess ? (
+        <p className="text-xs text-emerald-400">
+          Agent started — check the Ideas column on the project board in a few minutes.
+        </p>
+      ) : null}
+    </section>
+  );
 }
 
 /* ── agent fleet ─────────────────────────────────────────────── */
@@ -502,7 +912,7 @@ function AgentFleetPanel({
 }) {
   const query = useQuery({
     queryKey: ["agents"],
-    queryFn: () => getJson<{ providers: AgentProvider[] }>("/api/agents"),
+    queryFn: () => getJson<AgentsResponse>("/api/agents"),
   });
   const providers = query.data?.providers ?? [];
 
@@ -512,7 +922,7 @@ function AgentFleetPanel({
         <div>
           <h2 className="text-sm font-semibold uppercase tracking-wider text-bai-mute">Agent fleet</h2>
           <p className="mt-1 text-[11px] leading-relaxed text-bai-mute/80">
-            Pick how work runs. Only Claude Code headless dispatches from here — log other runs for cost tracking.
+            Claude Code runs a three-agent team (analyze → implement → validate). Log other runs for cost tracking.
           </p>
         </div>
       ) : null}
@@ -882,6 +1292,11 @@ function SpendDashboard({ providers }: { providers: AgentProvider[] }) {
                   <span className={`h-2 w-2 shrink-0 rounded-full ${dot[d.status]}`} />
                   <DomainBadge domain={d.domain} repo={d.repo} size="xs" />
                   {meta ? <span className={`text-[10px] font-medium ${meta.tone}`}>{meta.shortLabel}</span> : null}
+                  {d.pipelineStage ? (
+                    <span className="rounded bg-bai-surface px-1.5 py-0.5 text-[10px] capitalize text-bai-mute">
+                      {d.pipelineStage}
+                    </span>
+                  ) : null}
                   <span className="text-bai-mute">#{d.issueNumber}</span>
                   <span className="min-w-0 flex-1 truncate text-bai-fg">{d.title}</span>
                   {d.durationMs ? <span className="text-[11px] tabular-nums text-bai-mute">{mins(d.durationMs)}</span> : null}
@@ -1050,12 +1465,15 @@ function NewTaskForm({
 
 /* ── board ───────────────────────────────────────────────────── */
 
-const STAGES = [
+const STAGES: { key: TaskStage; label: string; tone: string }[] = [
+  { key: "agent:idea", label: "Ideas", tone: "border-lime-400/70" },
   { key: "agent:ready", label: "Ready", tone: "border-bai-orange" },
-  { key: "agent:building", label: "Building", tone: "border-bai-metal" },
+  { key: "agent:analyzing", label: "Analyze", tone: "border-sky-400/80" },
+  { key: "agent:implementing", label: "Build", tone: "border-bai-metal" },
+  { key: "agent:validating", label: "Validate", tone: "border-violet-400/80" },
   { key: "agent:review", label: "In review", tone: "border-bai-orange-deep" },
   { key: "done", label: "Done", tone: "border-bai-line" },
-] as const;
+];
 
 function TaskCard({
   task,
@@ -1121,7 +1539,7 @@ function TaskCard({
             onClick={() => dispatch.mutate()}
             className="w-full rounded-md border border-bai-orange bg-bai-orange/15 px-2 py-2 text-[11px] font-semibold text-bai-orange hover:bg-bai-orange/25 disabled:opacity-50"
           >
-            {dispatch.isPending ? "Starting…" : "▶ Dispatch Claude Code"}
+            {dispatch.isPending ? "Starting team…" : "▶ Dispatch agent team"}
           </button>
           <button
             type="button"
@@ -1370,7 +1788,9 @@ function PortfolioOverview({
             ) : (
               <p className="mt-1.5 flex gap-2.5 text-[11px] tabular-nums">
                 <span className="text-bai-orange">{count("agent:ready")} ready</span>
-                <span className="text-bai-metal">{count("agent:building")} building</span>
+                <span className="text-bai-metal">
+                  {PIPELINE_ACTIVE.reduce((n, s) => n + count(s), 0)} in pipeline
+                </span>
                 <span className="text-bai-orange-deep">{count("agent:review")} review</span>
               </p>
             )}
@@ -1574,7 +1994,7 @@ function DashboardView({
 }: {
   boards: Board[];
   spend?: SpendSummary;
-  totals: { ready: number; building: number; review: number; prs: number };
+  totals: { ready: number; pipeline: number; review: number; prs: number };
   onOpenProject: (projectId: string) => void;
   onOpenProjects: () => void;
   onOpenNewTask: (projectId?: string) => void;
@@ -1592,7 +2012,7 @@ function DashboardView({
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         <StatCard label="Awaiting review" value={totals.prs} tone={totals.prs > 0 ? "accent" : "default"} />
         <StatCard label="Ready for agents" value={totals.ready} tone={totals.ready > 0 ? "warn" : "default"} />
-        <StatCard label="Building" value={totals.building} />
+        <StatCard label="In pipeline" value={totals.pipeline} />
         <StatCard label="Spend today" value={spend ? usd(spend.todayUsd) : "$0.00"} />
       </div>
 
@@ -1717,7 +2137,7 @@ function ProjectListItem({
   spend?: SpendSummary;
 }) {
   const ready = board.tasks.filter((t) => t.stage === "agent:ready").length;
-  const building = board.tasks.filter((t) => t.stage === "agent:building").length;
+  const pipeline = pipelineTaskCount(board);
   const quiet = isQuiet(board);
   const budget = projectBudget(spend, board.project.id);
 
@@ -1750,7 +2170,7 @@ function ProjectListItem({
         ) : (
           <>
             {ready > 0 ? <span className="text-bai-orange">{ready} ready</span> : null}
-            {building > 0 ? <span className="text-bai-metal">{building} building</span> : null}
+            {pipeline > 0 ? <span className="text-bai-metal">{pipeline} in pipeline</span> : null}
           </>
         )}
         {budget?.anyExceeded ? <span className="text-red-400">over budget</span> : null}
@@ -1941,7 +2361,7 @@ function BaiDigitalOffice() {
 
   const agentsQuery = useQuery({
     queryKey: ["agents"],
-    queryFn: () => getJson<{ providers: AgentProvider[] }>("/api/agents"),
+    queryFn: () => getJson<AgentsResponse>("/api/agents"),
   });
   const projectsQuery = useQuery({
     queryKey: ["projects"],
@@ -1968,13 +2388,13 @@ function BaiDigitalOffice() {
     (acc, b) => {
       for (const t of b.tasks) {
         if (t.stage === "agent:ready") acc.ready += 1;
-        else if (t.stage === "agent:building") acc.building += 1;
+        else if (PIPELINE_ACTIVE.includes(t.stage)) acc.pipeline += 1;
         else if (t.stage === "agent:review") acc.review += 1;
       }
       acc.prs += b.prs.length;
       return acc;
     },
-    { ready: 0, building: 0, review: 0, prs: 0 }
+    { ready: 0, pipeline: 0, review: 0, prs: 0 }
   );
 
   const attentionCount = totals.prs + totals.ready;
@@ -2124,6 +2544,7 @@ function BaiDigitalOffice() {
           <div className="mx-auto max-w-2xl space-y-5">
             {projects.length > 0 ? (
               <>
+                <SpecialistRunPanel projects={projects} />
                 <div className="space-y-2">
                   <p className="text-xs font-medium uppercase tracking-wider text-bai-mute">Default agent</p>
                   <CompactAgentPicker providers={providers} selected={provider} onSelect={setProvider} />
@@ -2152,7 +2573,14 @@ function BaiDigitalOffice() {
         {tab === "settings" ? (
           <div className="mx-auto max-w-3xl space-y-10">
             <section>
-              <h3 className="mb-3 text-sm font-semibold text-bai-fg">Default agent</h3>
+              <h3 className="mb-1 text-sm font-semibold text-bai-fg">All agents</h3>
+              <p className="mb-4 text-xs text-bai-mute">
+                Configure the build pipeline and specialist agents. Manual providers below for copy-paste workflows.
+              </p>
+              <AgentConfigEditor />
+            </section>
+            <section>
+              <h3 className="mb-3 text-sm font-semibold text-bai-fg">Manual providers</h3>
               <AgentFleetPanel selected={provider} onSelect={setProvider} showHeader={false} />
             </section>
             {projects.length > 0 ? (

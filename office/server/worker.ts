@@ -1,13 +1,13 @@
 /**
- * Hosted agent worker — polls GitHub for agent:ready tasks and dispatches
- * headless Claude Code (`claude -p`).
- *
- * Deploy on Railway/Fly (always-on). Vercel hosts the UI only and pings
- * POST /poll when a new task is created (WORKER_WEBHOOK_URL).
+ * Hosted agent worker — polls GitHub for agent:ready tasks and runs
+ * headless Claude Code (`claude -p`) + on-demand specialist agents.
  */
 import http from "node:http";
 import dotenv from "dotenv";
 import { pollReadyTasks } from "./lib/agentPoller.ts";
+import { findProject } from "./lib/projects.ts";
+import { isSpecialistAgentId } from "./lib/agentConfig.ts";
+import { startSpecialistRun } from "./lib/specialists.ts";
 
 dotenv.config({ path: [".env.local", ".env"] });
 
@@ -36,6 +36,23 @@ function authOk(req: http.IncomingMessage): boolean {
   return String(req.headers.authorization || "").trim() === `Bearer ${workerSecret}`;
 }
 
+function readJsonBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    let raw = "";
+    req.on("data", (chunk) => {
+      raw += chunk.toString();
+    });
+    req.on("end", () => {
+      try {
+        resolve(raw ? (JSON.parse(raw) as Record<string, unknown>) : {});
+      } catch {
+        reject(new Error("Invalid JSON body"));
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
 const server = http.createServer((req, res) => {
   const url = req.url?.split("?")[0] ?? "";
 
@@ -57,11 +74,53 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (req.method === "POST" && url.startsWith("/specialist/")) {
+    if (!authOk(req)) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Unauthorized" }));
+      return;
+    }
+    const id = url.slice("/specialist/".length);
+    if (!isSpecialistAgentId(id)) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Unknown specialist agent." }));
+      return;
+    }
+    void readJsonBody(req)
+      .then((body) => {
+        const project = findProject(String(body.project || ""));
+        if (!project) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Unknown project." }));
+          return;
+        }
+        const result = startSpecialistRun({
+          id,
+          repo: project.repo,
+          projectName: project.name,
+          focus: String(body.focus || ""),
+          ideaCount: body.ideaCount != null ? Number(body.ideaCount) : undefined,
+        });
+        if (!result.ok) {
+          res.writeHead(result.status, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: result.error }));
+          return;
+        }
+        res.writeHead(202, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, run: result.run }));
+      })
+      .catch((err) => {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err instanceof Error ? err.message : "Bad request" }));
+      });
+    return;
+  }
+
   res.writeHead(404).end();
 });
 
 server.listen(port, () => {
-  console.log(`[worker] listening on :${port} (GET /health · POST /poll)`);
+  console.log(`[worker] listening on :${port} (GET /health · POST /poll · POST /specialist/:id)`);
   void tick("startup");
   setInterval(() => void tick("interval"), intervalMs);
 });

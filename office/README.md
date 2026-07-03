@@ -6,7 +6,9 @@ styled after [baidigital.xyz](https://baidigital.xyz) (near-black `#050505`, war
 `tailwind.config.ts`).
 
 Write a well-described task → it becomes a GitHub issue labeled `agent:ready` →
-a hosted worker picks it up → you review the PR. No database — GitHub Issues are the
+the **agent team** runs (analyze → implement → validate) → you review the PR.
+
+**Growth & research** specialists create `agent:idea` issues from the Create tab. No database — GitHub Issues are the
 queue, PRs are the review surface.
 
 ## Architecture (two services)
@@ -21,7 +23,7 @@ Vercel cannot run agents (no Claude CLI, no background process). The worker runs
 ```
 You → office.baidigital.xyz → GitHub issue (agent:ready)
                                     ↓
-              Railway worker → claude -p → PR → you approve in office
+              Railway worker → analyze · implement · validate → PR → you approve in office
 ```
 
 ## Deploy Vercel (UI)

@@ -1,5 +1,5 @@
 /**
- * Polls GitHub for agent:ready tasks and dispatches Claude Code agents.
+ * Polls GitHub for agent:ready tasks and dispatches the three-agent pipeline.
  * Runs on the machine where `claude` CLI is logged in (platform.claude.com credits).
  *
  * Enable with AGENT_POLL_ENABLED=true on the API host, or run `npm run worker`.

@@ -6,22 +6,44 @@
  * ("Closes #N"). No database — GitHub is the store agents already read.
  *
  * Stage labels:
- *   agent:ready     — described, waiting for an agent to pick it up
- *   agent:building  — an agent has claimed it and is working
- *   agent:review    — a PR is open and waits for human review
+ *   agent:ready          — described, waiting for the agent team
+ *   agent:analyzing      — analysis agent exploring the task
+ *   agent:implementing   — implementation agent building the slice
+ *   agent:validating     — validation agent running verify + PR
+ *   agent:review         — PR open, waiting for human review
+ *   agent:idea           — growth/research backlog (not auto-built)
+ *   agent:building       — legacy label (mapped to agent:implementing in UI)
  */
 
 const API = "https://api.github.com";
 
 export const AGENT_LABEL = "agent";
-export const STAGE_LABELS = ["agent:ready", "agent:building", "agent:review"] as const;
+export const STAGE_LABELS = [
+  "agent:ready",
+  "agent:analyzing",
+  "agent:implementing",
+  "agent:validating",
+  "agent:review",
+  "agent:idea",
+  "agent:building",
+] as const;
 export type StageLabel = (typeof STAGE_LABELS)[number];
+
+export const PIPELINE_STAGE_LABELS = [
+  "agent:analyzing",
+  "agent:implementing",
+  "agent:validating",
+] as const;
 
 const LABEL_DEFINITIONS: Array<{ name: string; color: string; description: string }> = [
   { name: AGENT_LABEL, color: "6f42c1", description: "Task for the AI agent workforce" },
-  { name: "agent:ready", color: "0e8a16", description: "Described and ready for an agent to pick up" },
-  { name: "agent:building", color: "fbca04", description: "An agent is working on this" },
+  { name: "agent:ready", color: "0e8a16", description: "Described and ready for the agent team" },
+  { name: "agent:analyzing", color: "c5def5", description: "Analysis agent exploring the task" },
+  { name: "agent:implementing", color: "fbca04", description: "Implementation agent building the feature" },
+  { name: "agent:validating", color: "d4c5f9", description: "Validation agent verifying and opening PR" },
+  { name: "agent:building", color: "fbca04", description: "Legacy — agent working (use agent:implementing)" },
   { name: "agent:review", color: "1d76db", description: "PR open — waiting for human review" },
+  { name: "agent:idea", color: "e4e669", description: "Growth/research idea — promote to agent:ready when approved" },
 ];
 
 function token(): string {
@@ -67,10 +89,13 @@ function issueToTask(raw: Record<string, unknown>): TaskIssue {
   const labels = (Array.isArray(raw.labels) ? raw.labels : [])
     .map((l) => String((l as Record<string, unknown>).name || ""))
     .filter(Boolean);
+  const rawStage = STAGE_LABELS.find((s) => labels.includes(s));
   const stage =
     raw.state === "closed"
       ? ("done" as const)
-      : (STAGE_LABELS.find((s) => labels.includes(s)) ?? "agent:ready");
+      : rawStage === "agent:building"
+        ? ("agent:implementing" as const)
+        : (rawStage ?? "agent:ready");
   const priority = labels.find((l) => l.startsWith("prio:")) ?? null;
   const assigneeRaw = raw.assignee as Record<string, unknown> | null;
   return {
@@ -179,8 +204,8 @@ export async function createTask(
     `---`,
     `**Agent contract:** follow the repo's AGENTS.md + ai/ folder and the company`,
     `PLAYBOOK. Work on a \`feat/<slug>\` branch, keep the verify suite green, open a`,
-    `PR that references this issue (\`Closes #N\`), and move this issue's stage label`,
-    `to \`agent:building\` when you start and \`agent:review\` when the PR is open.`,
+    `PR that references this issue (\`Closes #N\`). The office agent team runs three stages:`,
+    `\`agent:analyzing\` → \`agent:implementing\` → \`agent:validating\` → \`agent:review\`.`,
   ].join("\n");
 
   const res = await gh(`/repos/${input.repo}/issues`, {
@@ -291,4 +316,42 @@ export async function mergePullRequest(
   }
   const merged = res.data as Record<string, unknown>;
   return { ok: true, sha: String(merged.sha || "") };
+}
+
+/** Move an issue to a pipeline stage label (preserves agent + prio labels). */
+export async function setIssueStage(
+  repo: string,
+  issueNumber: number,
+  stage: StageLabel
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  const view = await gh(`/repos/${repo}/issues/${issueNumber}`);
+  if (!view.ok) {
+    return { ok: false, message: "Could not load issue for stage update." };
+  }
+  const labels = (Array.isArray((view.data as Record<string, unknown>).labels)
+    ? (view.data as Record<string, unknown>).labels
+    : []) as Array<Record<string, unknown>>;
+  const names = labels.map((l) => String(l.name || "")).filter(Boolean);
+  const keep = names.filter((n) => n === AGENT_LABEL || n.startsWith("prio:"));
+  const next = [...new Set([...keep, stage])];
+  const res = await gh(`/repos/${repo}/issues/${issueNumber}`, {
+    method: "PATCH",
+    body: JSON.stringify({ labels: next }),
+  });
+  if (!res.ok) {
+    const message = String((res.data as Record<string, unknown> | null)?.message || "Stage update failed.");
+    return { ok: false, message };
+  }
+  return { ok: true };
+}
+
+export async function commentOnIssue(
+  repo: string,
+  issueNumber: number,
+  body: string
+): Promise<void> {
+  await gh(`/repos/${repo}/issues/${issueNumber}/comments`, {
+    method: "POST",
+    body: JSON.stringify({ body }),
+  });
 }

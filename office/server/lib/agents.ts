@@ -29,14 +29,14 @@ export interface AgentProvider {
 export const AGENT_PROVIDERS: AgentProvider[] = [
   {
     id: "claude-code",
-    name: "Claude Code (headless)",
+    name: "Claude Code (agent team)",
     shortLabel: "Claude Code",
-    tagline: "Auto-dispatch via `claude -p` — billed on platform.claude.com",
+    tagline: "Three-agent pipeline — analyze (Sonnet) → implement (Opus) → validate (Sonnet)",
     tone: "text-bai-orange",
     billing: "auto",
     billingLabel: "platform.claude.com credits",
     dispatchMode: "office",
-    dispatchLabel: "One-click dispatch from office",
+    dispatchLabel: "Dispatch analyze → implement → validate from office",
     costTracking: "auto",
     costNote: "USD per run parsed from Claude CLI JSON (`total_cost_usd`).",
     requirements: ["Claude Code CLI logged in (`claude`)", "Runs on your machine or worker — not Vercel"],
@@ -101,12 +101,12 @@ export function normalizeProviderId(raw: string): AgentProviderId {
 /** Prompt pasted into Cursor Agent or similar IDE agents. */
 export function ideAgentPrompt(repo: string, issueNumber: number): string {
   return [
-    `Execute GitHub issue #${issueNumber} in ${repo} per the BAI agent contract in the issue body.`,
+    `Execute GitHub issue #${issueNumber} in ${repo} using the BAI three-agent team workflow in the issue body.`,
     ``,
-    `1. Read the issue on GitHub (Context, Build steps, Done-when criteria).`,
-    `2. Label the issue agent:building, then create feat/<slug> from main.`,
-    `3. Follow AGENTS.md + ai/ in the repo. Smallest safe diff; run verify until green.`,
-    `4. Open a PR with "Closes #${issueNumber}" and label agent:review.`,
+    `1. **Analyze** — explore repo, post structured analysis comment (see office/ai/agents/analyze-agent.md).`,
+    `2. **Implement** — feat/<slug> branch, vertical slice, push (no PR yet).`,
+    `3. **Validate** — verify green, open PR with "Closes #${issueNumber}", label agent:review.`,
+    `Follow AGENTS.md + ai/ in the repo. Smallest safe diff; run verify until green.`,
     `Never push to main or merge the PR.`,
   ].join("\n");
 }
@@ -115,8 +115,8 @@ export function ideAgentPrompt(repo: string, issueNumber: number): string {
 export function claudeInteractiveCommand(repo: string, issueNumber: number): string {
   const prompt = [
     `Execute GitHub issue #${issueNumber} in ${repo} per the BAI agent contract in its body:`,
-    `read with gh issue view ${issueNumber} --repo ${repo}, label agent:building, clone,`,
-    `build on feat/ branch, verify green, PR with Closes #${issueNumber}, label agent:review.`,
+    `read with gh issue view ${issueNumber} --repo ${repo}, run analyze → implement → validate,`,
+    `PR with Closes #${issueNumber}, label agent:review.`,
     `Never push to main or merge.`,
   ].join(" ");
   return `claude "${prompt.replace(/"/g, '\\"')}" --permission-mode acceptEdits`;

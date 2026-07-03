@@ -7,7 +7,8 @@
  *   POST /api/dispatch   — dispatch agent on existing agent:ready task
  *   POST /api/prs/merge  — squash-merge PR → Vercel deploys main
  *   GET  /api/prs/detail — PR + CI status
- *   GET  /api/agents     — agent provider catalog + availability
+ *   GET  /api/agents     — provider catalog + agent team settings
+ *   PUT  /api/agent-team — save pipeline agent settings
  *   GET  /api/dispatches — agent run history + spend by provider
  *   POST /api/runs       — log a manual run (Cursor, interactive Claude, API)
  *   GET  /api/budgets    — per-project limits + spend status
@@ -28,6 +29,19 @@ import {
   mergePullRequest,
 } from "./lib/github.ts";
 import { agentCatalog } from "./lib/agents.ts";
+import {
+  listPipelineAgentViews,
+  listSpecialistAgentViews,
+  readAgentTeamConfig,
+  resetAgentTeamStage,
+  resetSpecialistAgent,
+  setAgentTeamConfig,
+  isSpecialistAgentId,
+  SUGGESTED_MODELS,
+  type PipelineStageId,
+  type StageSettings,
+} from "./lib/agentConfig.ts";
+import { startSpecialistRun } from "./lib/specialists.ts";
 import { readAllBudgets, setProjectBudget, budgetStatusForProjects } from "./lib/budgets.ts";
 import {
   listDispatches,
@@ -39,7 +53,7 @@ import {
 } from "./lib/dispatch.ts";
 import { startAgentPoller } from "./lib/agentPoller.ts";
 import { requireWriteAuth } from "./lib/auth.ts";
-import { notifyWorkerPoll } from "./lib/workerWebhook.ts";
+import { notifyWorkerPoll, notifyWorkerSpecialist } from "./lib/workerWebhook.ts";
 
 dotenv.config({ path: [".env.local", ".env"] });
 
@@ -62,7 +76,102 @@ app.get("/api/projects", (_req, res) => {
 });
 
 app.get("/api/agents", (_req, res) => {
-  res.json({ providers: agentCatalog(dispatchAvailable()), defaultProvider: "claude-code" });
+  const config = readAgentTeamConfig();
+  res.json({
+    providers: agentCatalog(dispatchAvailable()),
+    team: listPipelineAgentViews(),
+    specialists: listSpecialistAgentViews(),
+    suggestedModels: SUGGESTED_MODELS,
+    teamUpdatedAt: config.updatedAt,
+    defaultProvider: "claude-code",
+  });
+});
+
+app.put("/api/agent-team", requireWriteAuth, (req, res) => {
+  const stages = req.body?.stages as Partial<Record<PipelineStageId, Partial<StageSettings>>> | undefined;
+  const specialists = req.body?.specialists as
+    | Partial<Record<"growth" | "research", Partial<StageSettings>>>
+    | undefined;
+  if (!stages && !specialists) {
+    return res.status(400).json({ error: "stages or specialists object is required." });
+  }
+  try {
+    const config = setAgentTeamConfig({ stages, specialists });
+    res.json({
+      ok: true,
+      team: listPipelineAgentViews(),
+      specialists: listSpecialistAgentViews(),
+      updatedAt: config.updatedAt,
+    });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : "Could not save agent settings." });
+  }
+});
+
+app.post("/api/agent-team/:stage/reset", requireWriteAuth, (req, res) => {
+  const stage = String(req.params.stage || "").trim();
+  try {
+    if (isSpecialistAgentId(stage)) {
+      const config = resetSpecialistAgent(stage);
+      return res.json({
+        ok: true,
+        team: listPipelineAgentViews(),
+        specialists: listSpecialistAgentViews(),
+        updatedAt: config.updatedAt,
+      });
+    }
+    if (stage !== "analyze" && stage !== "implement" && stage !== "validate") {
+      return res.status(400).json({ error: "Unknown agent." });
+    }
+    const config = resetAgentTeamStage(stage);
+    res.json({
+      ok: true,
+      team: listPipelineAgentViews(),
+      specialists: listSpecialistAgentViews(),
+      updatedAt: config.updatedAt,
+    });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : "Could not reset agent." });
+  }
+});
+
+app.post("/api/specialists/:id/run", requireWriteAuth, async (req, res) => {
+  const id = String(req.params.id || "").trim();
+  if (!isSpecialistAgentId(id)) {
+    return res.status(400).json({ error: "Unknown specialist agent." });
+  }
+  const project = findProject(String(req.body?.project || ""));
+  if (!project) return res.status(400).json({ error: "Unknown project." });
+
+  if (!dispatchAvailable()) {
+    const ping = await notifyWorkerSpecialist({
+      id,
+      project: project.id,
+      focus: String(req.body?.focus || ""),
+      ideaCount: req.body?.ideaCount != null ? Number(req.body.ideaCount) : undefined,
+    });
+    if (ping.ok) {
+      return res.json({
+        ok: true,
+        message: `${id} agent started on worker — check GitHub for new agent:idea issues shortly.`,
+      });
+    }
+    return res.status(503).json({
+      error: "Specialist agents need the Railway worker or local dispatch enabled.",
+    });
+  }
+
+  const result = startSpecialistRun({
+    id,
+    repo: project.repo,
+    projectName: project.name,
+    focus: String(req.body?.focus || ""),
+    ideaCount: req.body?.ideaCount != null ? Number(req.body.ideaCount) : undefined,
+  });
+  if (!result.ok) {
+    return res.status(result.status).json({ error: result.error });
+  }
+  res.json({ ok: true, run: result.run });
 });
 
 app.get("/api/board", async (req, res) => {

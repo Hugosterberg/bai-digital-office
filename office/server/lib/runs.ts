@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { AGENT_PROVIDERS, normalizeProviderId, type AgentProviderId } from "./agents.ts";
 import { findProjectByRepo, PROJECTS, type Project } from "./projects.ts";
 import { budgetStatusForProjects, type ProjectBudgetStatus } from "./budgets.ts";
+import type { PipelineStageId } from "./pipeline.ts";
 
 export interface AgentRun {
   id: string;
@@ -26,6 +27,9 @@ export interface AgentRun {
   resultSummary?: string;
   notes?: string;
   source: "dispatch" | "manual";
+  pipelineStage?: PipelineStageId;
+  pipelineId?: string;
+  specialist?: "growth" | "research";
 }
 
 export interface EnrichedAgentRun extends AgentRun {
@@ -112,6 +116,12 @@ function normalizeRun(raw: Record<string, unknown>): AgentRun {
     resultSummary: raw.resultSummary ? String(raw.resultSummary) : undefined,
     notes: raw.notes ? String(raw.notes) : undefined,
     source: raw.source === "manual" ? "manual" : "dispatch",
+    pipelineStage:
+      raw.pipelineStage === "analyze" || raw.pipelineStage === "implement" || raw.pipelineStage === "validate"
+        ? raw.pipelineStage
+        : undefined,
+    pipelineId: raw.pipelineId ? String(raw.pipelineId) : undefined,
+    specialist: raw.specialist === "growth" || raw.specialist === "research" ? raw.specialist : undefined,
   };
 }
 
