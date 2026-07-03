@@ -6,12 +6,13 @@ const queryClient = new QueryClient();
 const PROVIDER_KEY = "bai-office-agent-provider";
 const TAB_KEY = "bai-office-tab";
 
-type OfficeTab = "dashboard" | "projects" | "new-task" | "spend" | "settings";
+type OfficeTab = "dashboard" | "projects" | "new-task" | "automation" | "spend" | "settings";
 
 const TAB_META: Record<OfficeTab, { label: string; hint: string }> = {
   dashboard: { label: "Dashboard", hint: "What needs you right now — PRs to approve and tasks ready for agents." },
   projects: { label: "Projects", hint: "Pick a product, review its kanban, and merge PRs to production." },
   "new-task": { label: "Create", hint: "Describe the work — it becomes a GitHub issue for agents to pick up." },
+  automation: { label: "Automation", hint: "The self-driving layer — idea cycle, Slack approvals, site monitor, and autonomy." },
   spend: { label: "Spend", hint: "Track agent cost by project, provider, and issue." },
   settings: { label: "Settings", hint: "Configure the agent team, default provider, budgets, and manual run logs." },
 };
@@ -124,6 +125,38 @@ interface SiteStatus {
   responseMs?: number;
   error?: string;
   checkedAt: string;
+}
+
+interface PendingApproval {
+  ts: string;
+  repo: string;
+  prNumber: number;
+  issueNumber: number;
+  title: string;
+  createdAt: string;
+}
+
+interface AutomationResponse {
+  autoCycle: {
+    enabled: boolean;
+    running: boolean;
+    intervalMs: number;
+    lastRunAt?: string;
+    lastProjectId?: string;
+    nextRunAt?: string;
+    history: Array<{ projectId: string; ranAt: string; promoted?: string }>;
+  };
+  pendingApprovals: PendingApproval[];
+  sites: SiteStatus[];
+  projects: Array<{ id: string; name: string; repo: string; domain?: string; autonomy: string }>;
+  config: {
+    notifications: boolean;
+    slackApprovals: boolean;
+    siteMonitor: boolean;
+    autoPoll: boolean;
+    worker: boolean;
+  };
+  source: "worker" | "local";
 }
 
 interface AgentRun {
@@ -419,6 +452,257 @@ function AutonomySettings({ projects }: { projects: Project[] }) {
       </div>
       {setAutonomy.isError ? <p className="text-xs text-red-400">{(setAutonomy.error as Error).message}</p> : null}
     </section>
+  );
+}
+
+/* ── automation view ─────────────────────────────────────────── */
+
+function timeAgo(iso?: string): string {
+  if (!iso) return "never";
+  const mins = Math.round((Date.now() - Date.parse(iso)) / 60_000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 48) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
+
+function AutomationStatusPill({ on, onLabel, offLabel }: { on: boolean; onLabel: string; offLabel: string }) {
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] ${
+        on ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300" : "border-bai-line bg-bai-surface/40 text-bai-mute"
+      }`}
+    >
+      <span className={`h-1.5 w-1.5 rounded-full ${on ? "bg-emerald-400" : "bg-bai-mute/60"}`} />
+      {on ? onLabel : offLabel}
+    </span>
+  );
+}
+
+function PendingApprovalsPanel({ approvals }: { approvals: PendingApproval[] }) {
+  const qc = useQueryClient();
+  const merge = useMutation({
+    mutationFn: async (a: PendingApproval) =>
+      apiWrite("/api/prs/merge", { method: "POST", body: JSON.stringify({ repo: a.repo, number: a.prNumber }) }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["automation"] });
+      void qc.invalidateQueries({ queryKey: ["board"] });
+    },
+  });
+
+  return (
+    <section className="space-y-2">
+      <h3 className="text-base font-semibold text-bai-fg">Waiting for your ✅</h3>
+      {approvals.length === 0 ? (
+        <p className="rounded-md border border-bai-line/60 bg-bai-surface/20 px-3 py-2 text-xs text-bai-mute">
+          Nothing pending. Finished pipelines on manual projects show up here and in Slack — react ✅ there, or approve
+          here.
+        </p>
+      ) : (
+        <div className="space-y-1.5">
+          {approvals.map((a) => (
+            <div
+              key={`${a.repo}-${a.prNumber}`}
+              className="flex flex-wrap items-center gap-2 rounded-md border border-bai-orange/40 bg-bai-orange/5 px-2.5 py-2"
+            >
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-xs font-medium text-bai-fg">{a.title}</p>
+                <p className="text-[10px] text-bai-mute">
+                  {a.repo} · PR #{a.prNumber} · asked {timeAgo(a.createdAt)}
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={merge.isPending}
+                onClick={() => {
+                  if (!window.confirm(`Merge PR #${a.prNumber} in ${a.repo} to main?`)) return;
+                  merge.mutate(a);
+                }}
+                className="rounded-md bg-bai-orange px-3 py-1 text-[11px] font-semibold text-bai-bg hover:bg-bai-orange-deep disabled:opacity-40"
+              >
+                {merge.isPending ? "Merging…" : "✓ Approve → prod"}
+              </button>
+            </div>
+          ))}
+          {merge.isError ? <p className="text-xs text-red-400">{(merge.error as Error).message}</p> : null}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function AutoCyclePanel({ data }: { data: AutomationResponse }) {
+  const [message, setMessage] = useState<string | null>(null);
+  const [selected, setSelected] = useState("");
+  const cycle = data.autoCycle;
+  const projectName = (id?: string) => data.projects.find((p) => p.id === id)?.name ?? id ?? "—";
+
+  const run = useMutation({
+    mutationFn: async (project: string) =>
+      apiWrite<{ message: string }>("/api/cycle/run", { method: "POST", body: JSON.stringify({ project }) }),
+    onSuccess: (res) => setMessage(res.message),
+  });
+
+  return (
+    <section className="space-y-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-base font-semibold text-bai-fg">Idea cycle</h3>
+        <AutomationStatusPill
+          on={cycle.enabled}
+          onLabel={cycle.running ? "running now" : "scheduled"}
+          offLabel="off — set AUTO_CYCLE_ENABLED=true on the worker"
+        />
+      </div>
+      <p className="text-[11px] leading-relaxed text-bai-mute">
+        Growth agent generates ideas → prioritizer promotes the best one to the build queue → pipeline builds it. Last
+        run {timeAgo(cycle.lastRunAt)}
+        {cycle.lastProjectId ? ` (${projectName(cycle.lastProjectId)})` : ""}
+        {cycle.nextRunAt ? ` · next ${new Date(cycle.nextRunAt).toLocaleString()}` : ""}.
+      </p>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <select
+          value={selected}
+          onChange={(e) => setSelected(e.target.value)}
+          className="rounded-md border border-bai-line bg-bai-bg px-2 py-1.5 text-xs text-bai-fg"
+        >
+          <option value="">Pick a project…</option>
+          {data.projects.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          disabled={!selected || run.isPending}
+          onClick={() => run.mutate(selected)}
+          className="rounded-md border border-bai-orange/50 px-3 py-1.5 text-[11px] font-semibold text-bai-orange hover:bg-bai-orange/10 disabled:opacity-40"
+        >
+          {run.isPending ? "Starting…" : "Run cycle now"}
+        </button>
+        {message ? <span className="text-[11px] text-emerald-400">{message}</span> : null}
+        {run.isError ? <span className="text-[11px] text-red-400">{(run.error as Error).message}</span> : null}
+      </div>
+
+      {cycle.history.length > 0 ? (
+        <div className="space-y-1 pt-1">
+          <p className="text-[10px] font-medium uppercase tracking-wider text-bai-mute">Recent cycles</p>
+          {cycle.history.slice(0, 6).map((h) => (
+            <div
+              key={`${h.projectId}-${h.ranAt}`}
+              className="flex flex-wrap items-center gap-2 rounded-md border border-bai-line/60 bg-bai-surface/20 px-2.5 py-1.5 text-[11px]"
+            >
+              <span className="font-medium text-bai-fg">{projectName(h.projectId)}</span>
+              <span className="text-bai-mute">{timeAgo(h.ranAt)}</span>
+              <span className={h.promoted ? "text-emerald-400" : "text-bai-mute/70"}>
+                {h.promoted ?? "no idea promoted"}
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function AutomationView({ projects }: { projects: Project[] }) {
+  const qc = useQueryClient();
+  const query = useQuery({
+    queryKey: ["automation"],
+    queryFn: () => getJson<AutomationResponse>("/api/automation"),
+    refetchInterval: 30_000,
+  });
+  const checkSites = useMutation({
+    mutationFn: async () => apiWrite("/api/sites/check", { method: "POST", body: "{}" }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["automation"] });
+      void qc.invalidateQueries({ queryKey: ["sites"] });
+    },
+  });
+
+  if (query.isLoading) return <LoadingBlock label="Loading automation state…" />;
+  if (query.isError) {
+    return (
+      <p className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
+        {(query.error as Error).message}
+      </p>
+    );
+  }
+  const data = query.data!;
+  const cfg = data.config;
+
+  return (
+    <div className="space-y-8">
+      <div className="flex flex-wrap gap-2">
+        <AutomationStatusPill on={cfg.autoPoll || cfg.worker} onLabel="Agent pipeline on" offLabel="Agent pipeline off" />
+        <AutomationStatusPill on={cfg.notifications} onLabel="Slack notiser on" offLabel="Slack notiser off" />
+        <AutomationStatusPill
+          on={cfg.slackApprovals}
+          onLabel="✅-to-merge on"
+          offLabel="✅-to-merge off — set SLACK_BOT_TOKEN + SLACK_CHANNEL_ID"
+        />
+        <AutomationStatusPill on={cfg.siteMonitor} onLabel="Site monitor on" offLabel="Site monitor off" />
+        {data.source === "worker" ? (
+          <span className="inline-flex items-center rounded-full border border-bai-line bg-bai-surface/40 px-2 py-0.5 text-[10px] text-bai-mute">
+            live from worker
+          </span>
+        ) : null}
+      </div>
+
+      <PendingApprovalsPanel approvals={data.pendingApprovals} />
+
+      <AutoCyclePanel data={data} />
+
+      <section className="space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-base font-semibold text-bai-fg">Production health</h3>
+          <button
+            type="button"
+            disabled={checkSites.isPending}
+            onClick={() => checkSites.mutate()}
+            className="rounded-md border border-bai-line px-2.5 py-1 text-[11px] text-bai-mute hover:text-bai-fg disabled:opacity-40"
+          >
+            {checkSites.isPending ? "Checking…" : "Check all now"}
+          </button>
+        </div>
+        {data.sites.length === 0 ? (
+          <p className="rounded-md border border-bai-line/60 bg-bai-surface/20 px-3 py-2 text-xs text-bai-mute">
+            No site checks yet — the worker probes all project domains every 30 minutes.
+          </p>
+        ) : (
+          <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3 xl:grid-cols-4">
+            {data.sites.map((site) => (
+              <a
+                key={site.projectId}
+                href={`https://${site.domain}`}
+                target="_blank"
+                rel="noreferrer"
+                className={`rounded-md border px-2.5 py-2 text-xs transition-colors ${
+                  site.ok
+                    ? "border-emerald-500/25 bg-emerald-500/5 hover:border-emerald-500/50"
+                    : "border-red-500/40 bg-red-500/10 hover:border-red-500/60"
+                }`}
+              >
+                <div className="flex items-center gap-1.5">
+                  <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${site.ok ? "bg-emerald-400" : "bg-red-500 animate-pulse"}`} />
+                  <span className="truncate font-medium text-bai-fg">{site.domain}</span>
+                </div>
+                <p className="mt-1 text-[10px] tabular-nums text-bai-mute">
+                  {site.ok ? `${site.httpStatus} · ${site.responseMs}ms` : (site.error ?? `HTTP ${site.httpStatus}`)}
+                </p>
+              </a>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="space-y-2">
+        <h3 className="text-base font-semibold text-bai-fg">Autonomy per project</h3>
+        <AutonomySettings projects={projects} />
+      </section>
+    </div>
   );
 }
 
@@ -2652,7 +2936,14 @@ function ProjectsView({
 function BaiDigitalOffice() {
   const [tab, setTab] = useState<OfficeTab>(() => {
     const saved = localStorage.getItem(TAB_KEY);
-    if (saved === "dashboard" || saved === "projects" || saved === "new-task" || saved === "spend" || saved === "settings") {
+    if (
+      saved === "dashboard" ||
+      saved === "projects" ||
+      saved === "new-task" ||
+      saved === "automation" ||
+      saved === "spend" ||
+      saved === "settings"
+    ) {
       return saved;
     }
     return "dashboard";
@@ -2890,18 +3181,13 @@ function BaiDigitalOffice() {
           </div>
         ) : null}
 
+        {tab === "automation" ? <AutomationView projects={projects} /> : null}
+
         {tab === "spend" ? <SpendDashboard providers={providers} /> : null}
 
         {tab === "settings" ? (
           <div className="mx-auto max-w-3xl space-y-10">
             <WriteSecretSettings />
-            <section>
-              <h3 className="mb-1 text-sm font-semibold text-bai-fg">Autonomy per project</h3>
-              <p className="mb-3 text-xs text-bai-mute">
-                How much the company ships without you. Start with auto-safe on low-risk projects.
-              </p>
-              <AutonomySettings projects={projects} />
-            </section>
             <section>
               <h3 className="mb-1 text-sm font-semibold text-bai-fg">All agents</h3>
               <p className="mb-4 text-xs text-bai-mute">

@@ -63,13 +63,14 @@ import {
   notifyWorkerConfig,
   notifyWorkerBudget,
   notifyWorkerProjects,
+  notifyWorkerCycle,
   fetchWorkerState,
   workerConfigured,
 } from "./lib/workerWebhook.ts";
 import { notify, notificationsConfigured } from "./lib/notify.ts";
 import { startSiteMonitor, listSiteStatuses, checkAllSites, verifyDomainAfterDeploy } from "./lib/siteMonitor.ts";
-import { autoCycleStatus } from "./lib/autoCycle.ts";
-import { startSlackApprovalPolling, slackApprovalsConfigured } from "./lib/slackApprovals.ts";
+import { autoCycleStatus, runCycleForProject } from "./lib/autoCycle.ts";
+import { startSlackApprovalPolling, slackApprovalsConfigured, listPendingApprovals } from "./lib/slackApprovals.ts";
 
 dotenv.config({ path: [".env.local", ".env"] });
 
@@ -149,6 +150,52 @@ app.get("/api/sites", async (_req, res) => {
 app.post("/api/sites/check", requireWriteAuth, async (_req, res) => {
   const sites = await checkAllSites();
   res.json({ ok: true, sites });
+});
+
+/**
+ * One view of the whole automation layer: cycle status + history, pending
+ * Slack approvals, site health, autonomy per project, and config flags.
+ * Prefers the worker's durable state when this host is serverless.
+ */
+app.get("/api/automation", async (_req, res) => {
+  const local = !dispatchAvailable() && workerConfigured() ? await fetchWorkerState() : null;
+  res.json({
+    autoCycle: local?.autoCycle ?? autoCycleStatus(),
+    pendingApprovals: local?.pendingApprovals ?? listPendingApprovals(),
+    sites: local?.sites ?? listSiteStatuses(),
+    projects: listProjects().map((p) => ({ id: p.id, name: p.name, repo: p.repo, domain: p.domain, autonomy: p.autonomy ?? "manual" })),
+    config: {
+      notifications: notificationsConfigured(),
+      slackApprovals: slackApprovalsConfigured(),
+      siteMonitor: process.env.SITE_MONITOR_ENABLED === "true",
+      autoPoll: process.env.AGENT_POLL_ENABLED === "true",
+      worker: workerConfigured(),
+    },
+    source: local ? "worker" : "local",
+  });
+});
+
+/** Trigger a growth + prioritize cycle for one project right now. */
+app.post("/api/cycle/run", requireWriteAuth, async (req, res) => {
+  const project = findProject(String(req.body?.project || ""));
+  if (!project) return res.status(400).json({ error: "Unknown project." });
+
+  if (!dispatchAvailable()) {
+    const ping = await notifyWorkerCycle(project.id);
+    if (ping.ok) {
+      return res.json({
+        ok: true,
+        message: `Cycle started on the worker for ${project.name} — new ideas appear as agent:idea issues, the best one is auto-promoted in ~20 min.`,
+      });
+    }
+    return res.status(503).json({ error: "Cycle needs the Railway worker or local dispatch enabled." });
+  }
+
+  void runCycleForProject(project);
+  res.json({
+    ok: true,
+    message: `Cycle started for ${project.name} — new ideas appear as agent:idea issues, the best one is auto-promoted in ~20 min.`,
+  });
 });
 
 app.get("/api/agents", (_req, res) => {

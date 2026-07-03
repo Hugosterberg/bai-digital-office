@@ -48,12 +48,31 @@ function writeState(state: CycleState): void {
   writeFileSync(STATE_FILE, JSON.stringify({ ...state, history: state.history.slice(-50) }, null, 2) + "\n");
 }
 
-export function autoCycleStatus(): { enabled: boolean; lastRunAt?: string; lastProjectId?: string } {
+export interface AutoCycleStatusView {
+  enabled: boolean;
+  running: boolean;
+  intervalMs: number;
+  lastRunAt?: string;
+  lastProjectId?: string;
+  nextRunAt?: string;
+  history: Array<{ projectId: string; ranAt: string; promoted?: string }>;
+}
+
+export function autoCycleStatus(): AutoCycleStatusView {
   const state = readState();
+  const enabled = process.env.AUTO_CYCLE_ENABLED === "true";
+  const nextRunAt =
+    enabled && state.lastRunAt
+      ? new Date(Date.parse(state.lastRunAt) + CYCLE_INTERVAL_MS).toISOString()
+      : undefined;
   return {
-    enabled: process.env.AUTO_CYCLE_ENABLED === "true",
+    enabled,
+    running: cycleRunning,
+    intervalMs: CYCLE_INTERVAL_MS,
     lastRunAt: state.lastRunAt,
     lastProjectId: state.lastProjectId,
+    nextRunAt,
+    history: [...state.history].reverse().slice(0, 10),
   };
 }
 

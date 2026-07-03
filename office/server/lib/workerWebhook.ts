@@ -51,11 +51,19 @@ export async function notifyWorkerProjects(projects: unknown): Promise<{ ok: boo
   return postWorker(`${base}/projects`, { projects });
 }
 
+/** Kick off a growth + prioritize cycle for one project on the worker. */
+export async function notifyWorkerCycle(projectId: string): Promise<{ ok: boolean; skipped?: string }> {
+  const base = workerBaseUrl();
+  if (!base) return { ok: false, skipped: "WORKER_WEBHOOK_URL not set" };
+  return postWorker(`${base}/cycle`, { project: projectId });
+}
+
 export interface WorkerState {
   dispatches?: unknown[];
   spend?: unknown;
   sites?: unknown[];
   autoCycle?: unknown;
+  pendingApprovals?: unknown[];
 }
 
 /** Read live state (runs, spend, site checks) from the 24/7 worker — the
