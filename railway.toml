@@ -4,7 +4,7 @@
 
 [build]
 builder = "DOCKERFILE"
-dockerfilePath = "office/Dockerfile.worker"
+dockerfilePath = "Dockerfile.worker"
 
 [deploy]
 startCommand = "npm --prefix office run worker"
