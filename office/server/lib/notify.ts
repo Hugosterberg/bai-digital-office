@@ -8,6 +8,7 @@ export type NotifyEvent =
   | { kind: "pipeline-failed"; repo: string; issueNumber: number; title: string; stage: string; attempt: number }
   | { kind: "task-blocked"; repo: string; issueNumber: number; title: string; reason: string }
   | { kind: "auto-merged"; repo: string; prNumber: number; title: string; domain?: string }
+  | { kind: "merged"; repo: string; prNumber: number; by: string; domain?: string }
   | { kind: "incident"; repo: string; domain: string; detail: string; issueUrl?: string }
   | { kind: "incident-resolved"; repo: string; domain: string }
   | { kind: "budget-warning"; project: string; detail: string }
@@ -31,6 +32,8 @@ function formatEvent(event: NotifyEvent): string {
       return `:no_entry: *Task blocked* — ${event.repo}#${event.issueNumber} “${event.title}”\n${event.reason}`;
     case "auto-merged":
       return `:rocket: *Auto-merged to prod* — ${event.repo} PR #${event.prNumber} “${event.title}”${event.domain ? ` → ${event.domain}` : ""}`;
+    case "merged":
+      return `:rocket: *Merged to prod* (${event.by}) — ${event.repo} PR #${event.prNumber}${event.domain ? ` → ${event.domain}` : ""}`;
     case "incident":
       return `:fire: *Site incident* — ${event.domain} (${event.repo}): ${event.detail}${event.issueUrl ? `\n${event.issueUrl}` : ""}`;
     case "incident-resolved":

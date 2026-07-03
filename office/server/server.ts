@@ -67,8 +67,9 @@ import {
   workerConfigured,
 } from "./lib/workerWebhook.ts";
 import { notify, notificationsConfigured } from "./lib/notify.ts";
-import { startSiteMonitor, listSiteStatuses, checkAllSites } from "./lib/siteMonitor.ts";
+import { startSiteMonitor, listSiteStatuses, checkAllSites, verifyDomainAfterDeploy } from "./lib/siteMonitor.ts";
 import { autoCycleStatus } from "./lib/autoCycle.ts";
+import { startSlackApprovalPolling, slackApprovalsConfigured } from "./lib/slackApprovals.ts";
 
 dotenv.config({ path: [".env.local", ".env"] });
 
@@ -83,6 +84,7 @@ app.get("/api/health", (_req, res) => {
     dispatch: dispatchAvailable(),
     worker: workerConfigured(),
     notifications: notificationsConfigured(),
+    slackApprovals: slackApprovalsConfigured(),
     runningAgents: runningDispatchCount(),
     autoPoll: process.env.AGENT_POLL_ENABLED === "true",
     writeAuthRequired: Boolean(String(process.env.OFFICE_SECRET || "").trim()),
@@ -443,6 +445,10 @@ app.post("/api/prs/merge", requireWriteAuth, async (req, res) => {
   if (!result.ok) {
     return res.status(result.status).json({ error: result.message });
   }
+  void notify({ kind: "merged", repo, prNumber: number, by: "godkänd i office", domain: project.domain });
+  if (project.domain) {
+    void verifyDomainAfterDeploy(project);
+  }
   res.json({
     ok: true,
     sha: result.sha,
@@ -530,6 +536,7 @@ const isDirectRun = process.argv[1]?.replace(/\\/g, "/").endsWith("server/server
 if (isDirectRun) {
   startAgentPoller(Number(process.env.AGENT_POLL_INTERVAL_MS) || 90_000);
   startSiteMonitor();
+  startSlackApprovalPolling();
   const PORT = process.env.PORT || 3001;
   app.listen(PORT, () => console.log(`bai digital office api on :${PORT}`));
 }

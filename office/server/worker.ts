@@ -16,6 +16,7 @@ import { listDispatches, spendSummary } from "./lib/dispatch.ts";
 import { setProjectBudget } from "./lib/budgets.ts";
 import { startSiteMonitor, listSiteStatuses } from "./lib/siteMonitor.ts";
 import { startAutoCycle, autoCycleStatus, runCycleForProject } from "./lib/autoCycle.ts";
+import { startSlackApprovalPolling, listPendingApprovals } from "./lib/slackApprovals.ts";
 
 dotenv.config({ path: [".env.local", ".env"] });
 
@@ -84,6 +85,7 @@ const server = http.createServer((req, res) => {
       spend: spendSummary(),
       sites: listSiteStatuses(),
       autoCycle: autoCycleStatus(),
+      pendingApprovals: listPendingApprovals(),
     });
   }
 
@@ -180,4 +182,5 @@ server.listen(port, () => {
   setInterval(() => void tick("interval"), intervalMs);
   startSiteMonitor();
   startAutoCycle();
+  startSlackApprovalPolling();
 });

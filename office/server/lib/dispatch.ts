@@ -9,13 +9,14 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { normalizeProviderId, type AgentProviderId } from "./agents.ts";
-import { findProjectByRepo } from "./projects.ts";
+import { findProjectByRepo, projectAutonomy } from "./projects.ts";
 import { overBudgetMessage } from "./budgets.ts";
 import { commentOnIssue, setIssueStage, getIssueState, findOpenPrForIssue } from "./github.ts";
 import { getPipelineStages, type PipelineStageId } from "./pipeline.ts";
 import { type AgentRun, persistRun, listRecentRuns, spendSummary, enrichRun } from "./runs.ts";
 import { notify } from "./notify.ts";
 import { maybeAutoMerge } from "./autoMerge.ts";
+import { postApprovalRequest } from "./slackApprovals.ts";
 import { runClaude } from "./claude.ts";
 
 export type { AgentRun, SpendSummary, EnrichedAgentRun } from "./runs.ts";
@@ -175,13 +176,29 @@ async function runPipeline(
   }
 
   const pr = await findOpenPrForIssue(input.repo, input.issueNumber);
-  void notify({
-    kind: "pr-ready",
-    repo: input.repo,
-    issueNumber: input.issueNumber,
-    title: input.title,
-    prUrl: pr?.url,
-  });
+
+  // Autonomy != manual → auto-merge handles the rest. Manual → ask for a ✅ in
+  // Slack (falls back to a plain notification if the bot isn't configured).
+  const autonomy = projectAutonomy(findProjectByRepo(input.repo));
+  let approvalPosted = false;
+  if (autonomy === "manual" && pr) {
+    approvalPosted = await postApprovalRequest({
+      repo: input.repo,
+      prNumber: pr.number,
+      issueNumber: input.issueNumber,
+      title: input.title,
+      prUrl: pr.url,
+    });
+  }
+  if (!approvalPosted) {
+    void notify({
+      kind: "pr-ready",
+      repo: input.repo,
+      issueNumber: input.issueNumber,
+      title: input.title,
+      prUrl: pr?.url,
+    });
+  }
 
   void maybeAutoMerge(input.repo, input.issueNumber, input.title);
 }

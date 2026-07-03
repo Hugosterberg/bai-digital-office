@@ -1984,7 +1984,7 @@ function PrReviewRow({ repo, pr, domain }: { repo: string; pr: ReviewPr; domain?
         }}
         className="rounded-md bg-bai-orange px-3 py-1 text-[11px] font-semibold text-bai-bg hover:bg-bai-orange-deep disabled:opacity-40"
       >
-        {merge.isPending ? "Merging…" : "Approve → prod"}
+        {merge.isPending ? "Merging…" : "✓ Approve → prod"}
       </button>
       {merge.isSuccess ? <span className="text-[10px] text-emerald-400">Merged — deploying</span> : null}
       {merge.isError ? <span className="text-[10px] text-red-400">{(merge.error as Error).message}</span> : null}
