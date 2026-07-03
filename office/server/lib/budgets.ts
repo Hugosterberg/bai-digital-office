@@ -6,7 +6,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { findProject, PROJECTS } from "./projects.ts";
+import { findProject, listProjects } from "./projects.ts";
 import type { ProjectSpendRow } from "./runs.ts";
 
 export interface ProjectBudgetLimits {
@@ -152,7 +152,7 @@ export function buildBudgetStatus(row: ProjectSpendRow, limits: ProjectBudgetLim
 
 export function budgetStatusForProjects(byProject: ProjectSpendRow[]): ProjectBudgetStatus[] {
   const spendById = new Map(byProject.map((p) => [p.projectId, p]));
-  return PROJECTS.map((project) => {
+  return listProjects().map((project) => {
     const row = spendById.get(project.id) ?? {
       projectId: project.id,
       name: project.name,

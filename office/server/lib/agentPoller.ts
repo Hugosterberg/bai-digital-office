@@ -5,7 +5,7 @@
  * Enable with AGENT_POLL_ENABLED=true on the API host, or run `npm run worker`.
  */
 
-import { PROJECTS } from "./projects.ts";
+import { listProjects } from "./projects.ts";
 import { listTasks } from "./github.ts";
 import { startDispatch, runningDispatchCount } from "./dispatch.ts";
 
@@ -18,7 +18,7 @@ export async function pollReadyTasks(): Promise<{ dispatched: number; skipped: n
   let dispatched = 0;
   let skipped = 0;
   try {
-    for (const project of PROJECTS) {
+    for (const project of listProjects()) {
       if (runningDispatchCount() >= 3) break;
       let tasks;
       try {

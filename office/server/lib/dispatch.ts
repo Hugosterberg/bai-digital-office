@@ -5,16 +5,18 @@
  * Only `claude-code` provider is auto-dispatched here.
  */
 
-import { spawn } from "node:child_process";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { normalizeProviderId, type AgentProviderId } from "./agents.ts";
 import { findProjectByRepo } from "./projects.ts";
 import { overBudgetMessage } from "./budgets.ts";
-import { commentOnIssue, setIssueStage } from "./github.ts";
+import { commentOnIssue, setIssueStage, getIssueState, findOpenPrForIssue } from "./github.ts";
 import { getPipelineStages, type PipelineStageId } from "./pipeline.ts";
 import { type AgentRun, persistRun, listRecentRuns, spendSummary, enrichRun } from "./runs.ts";
+import { notify } from "./notify.ts";
+import { maybeAutoMerge } from "./autoMerge.ts";
+import { runClaude } from "./claude.ts";
 
 export type { AgentRun, SpendSummary, EnrichedAgentRun } from "./runs.ts";
 export { spendSummary, listRecentRuns, logManualRun, enrichRun, issueKey } from "./runs.ts";
@@ -22,33 +24,12 @@ export { spendSummary, listRecentRuns, logManualRun, enrichRun, issueKey } from 
 const dispatches = new Map<string, AgentRun>();
 const MAX_TAIL = 4_000;
 const MAX_CONCURRENT = 3;
+/** Failed pipeline attempts before the issue is parked as agent:blocked. */
+const MAX_ATTEMPTS = Number(process.env.AGENT_MAX_ATTEMPTS) || 2;
 
 for (const run of listRecentRuns(20)) {
   if (run.pipelineId) dispatches.set(run.pipelineId, run);
   else dispatches.set(run.id, run);
-}
-
-/** Tools the dispatched agent may use without per-call approval. */
-const AGENT_ALLOWED_TOOLS = [
-  "Bash(git:*)",
-  "Bash(gh:*)",
-  "Bash(npm:*)",
-  "Bash(npx:*)",
-  "Bash(node:*)",
-  "Edit",
-  "Write",
-  "Read",
-  "Glob",
-  "Grep",
-].join(",");
-
-interface StageRunResult {
-  ok: boolean;
-  costUsd?: number;
-  durationMs?: number;
-  numTurns?: number;
-  resultSummary?: string;
-  outputTail?: string;
 }
 
 function pipelineId(repo: string, issueNumber: number): string {
@@ -78,45 +59,51 @@ export function registerDispatch(run: AgentRun): void {
   dispatches.set(run.id, run);
 }
 
-function runClaudeStage(
-  workdir: string,
-  prompt: string,
-  model: string
-): Promise<StageRunResult> {
-  return new Promise((resolve) => {
-    const cmd = `claude -p --output-format json --permission-mode acceptEdits --model "${model}" --allowedTools "${AGENT_ALLOWED_TOOLS}"`;
-    const child = spawn(cmd, { cwd: workdir, shell: true, windowsHide: true, env: process.env });
-    child.stdin?.end(prompt);
+/** Failure handling: retry (back to agent:ready) or park as agent:blocked after MAX_ATTEMPTS. */
+async function handlePipelineFailure(
+  input: { repo: string; issueNumber: number; title: string },
+  stageTitle: string,
+  detail: string
+): Promise<void> {
+  const state = await getIssueState(input.repo, input.issueNumber);
+  const attempt = (state?.attempts ?? 0) + 1;
 
-    let stdoutBuf = "";
-    let stderrTail = "";
-    child.stdout?.on("data", (chunk: Buffer) => {
-      stdoutBuf = (stdoutBuf + chunk.toString()).slice(-200_000);
+  if (attempt >= MAX_ATTEMPTS) {
+    await setIssueStage(input.repo, input.issueNumber, "agent:blocked", { attempts: attempt });
+    await commentOnIssue(
+      input.repo,
+      input.issueNumber,
+      `**Agent team blocked after ${attempt} failed attempt${attempt === 1 ? "" : "s"}** (last failure: ${stageTitle}).\n\nThis task will not be retried automatically. Fix the task description or the underlying problem, then set the label back to \`agent:ready\`.\n\n${detail}`.slice(
+        0,
+        4000
+      )
+    );
+    void notify({
+      kind: "task-blocked",
+      repo: input.repo,
+      issueNumber: input.issueNumber,
+      title: input.title,
+      reason: `${attempt} failed attempts — last failure at ${stageTitle}.`,
     });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      stderrTail = (stderrTail + chunk.toString()).slice(-MAX_TAIL);
-    });
-    child.on("error", (err) => {
-      resolve({ ok: false, outputTail: `spawn error: ${err.message}` });
-    });
-    child.on("close", (code) => {
-      try {
-        const result = JSON.parse(stdoutBuf.slice(stdoutBuf.indexOf("{"))) as Record<string, unknown>;
-        resolve({
-          ok: !result.is_error && code === 0,
-          costUsd: Number(result.total_cost_usd) || undefined,
-          durationMs: Number(result.duration_ms) || undefined,
-          numTurns: Number(result.num_turns) || undefined,
-          resultSummary: String(result.result || "").slice(0, 400),
-          outputTail: stderrTail || undefined,
-        });
-      } catch {
-        resolve({
-          ok: code === 0,
-          outputTail: (stderrTail + stdoutBuf).slice(-MAX_TAIL),
-        });
-      }
-    });
+    return;
+  }
+
+  await setIssueStage(input.repo, input.issueNumber, "agent:ready", { attempts: attempt });
+  await commentOnIssue(
+    input.repo,
+    input.issueNumber,
+    `**Agent team stopped at ${stageTitle}** (attempt ${attempt}/${MAX_ATTEMPTS}) — issue restored to \`agent:ready\` for one retry.\n\n${detail}`.slice(
+      0,
+      4000
+    )
+  );
+  void notify({
+    kind: "pipeline-failed",
+    repo: input.repo,
+    issueNumber: input.issueNumber,
+    title: input.title,
+    stage: stageTitle,
+    attempt,
   });
 }
 
@@ -137,7 +124,7 @@ async function runPipeline(
       console.warn(`[dispatch] stage label ${stage.stageLabel}: ${stageUpdate.message}`);
     }
 
-    const result = await runClaudeStage(workdir, stage.prompt(input.repo, input.issueNumber), stage.model);
+    const result = await runClaude(workdir, stage.prompt(input.repo, input.issueNumber), stage.model);
     totalCost += result.costUsd || 0;
 
     const stageRun: AgentRun = {
@@ -168,15 +155,7 @@ async function runPipeline(
         -MAX_TAIL
       );
       persistRun(pipeline);
-      await setIssueStage(input.repo, input.issueNumber, "agent:ready");
-      await commentOnIssue(
-        input.repo,
-        input.issueNumber,
-        `**Agent team stopped at ${stage.title}** — stage failed. Issue restored to \`agent:ready\`.\n\n${result.resultSummary || result.outputTail || ""}`.slice(
-          0,
-          4000
-        )
-      );
+      await handlePipelineFailure(input, stage.title, result.resultSummary || result.outputTail || "");
       return;
     }
   }
@@ -187,6 +166,24 @@ async function runPipeline(
   pipeline.costUsd = totalCost || undefined;
   pipeline.resultSummary = "Pipeline complete — awaiting human review on PR.";
   persistRun(pipeline);
+
+  // Server-side guarantee: the issue lands on agent:review even if the validate
+  // agent forgot the label switch, and clear the attempts counter.
+  const issueState = await getIssueState(input.repo, input.issueNumber);
+  if (issueState && (issueState.stage !== "agent:review" || issueState.attempts > 0)) {
+    await setIssueStage(input.repo, input.issueNumber, "agent:review", { attempts: null });
+  }
+
+  const pr = await findOpenPrForIssue(input.repo, input.issueNumber);
+  void notify({
+    kind: "pr-ready",
+    repo: input.repo,
+    issueNumber: input.issueNumber,
+    title: input.title,
+    prUrl: pr?.url,
+  });
+
+  void maybeAutoMerge(input.repo, input.issueNumber, input.title);
 }
 
 export function startDispatch(input: {
@@ -242,7 +239,7 @@ export function startDispatch(input: {
     state.finishedAt = new Date().toISOString();
     state.outputTail = `pipeline error: ${err instanceof Error ? err.message : String(err)}`.slice(-MAX_TAIL);
     persistRun(state);
-    await setIssueStage(input.repo, input.issueNumber, "agent:ready");
+    await handlePipelineFailure(input, "pipeline", state.outputTail ?? "");
   });
 
   return { ok: true, dispatch: state };

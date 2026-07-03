@@ -23,6 +23,7 @@ interface Project {
   name: string;
   repo: string;
   domain?: string;
+  autonomy?: "manual" | "auto-safe" | "full";
 }
 
 type TaskStage =
@@ -32,6 +33,7 @@ type TaskStage =
   | "agent:implementing"
   | "agent:validating"
   | "agent:review"
+  | "agent:blocked"
   | "done";
 
 interface TaskIssue {
@@ -112,6 +114,16 @@ interface AgentsResponse {
   suggestedModels: string[];
   teamUpdatedAt?: string;
   defaultProvider: AgentProviderId;
+}
+
+interface SiteStatus {
+  projectId: string;
+  domain: string;
+  ok: boolean;
+  httpStatus?: number;
+  responseMs?: number;
+  error?: string;
+  checkedAt: string;
 }
 
 interface AgentRun {
@@ -293,6 +305,120 @@ function SystemHealthBar() {
         </span>
       )}
     </div>
+  );
+}
+
+function SitesPanel() {
+  const query = useQuery({
+    queryKey: ["sites"],
+    queryFn: () =>
+      getJson<{ sites: SiteStatus[]; autoCycle: { enabled: boolean; lastRunAt?: string } | null }>("/api/sites"),
+    refetchInterval: 60_000,
+  });
+  const sites = query.data?.sites ?? [];
+  const cycle = query.data?.autoCycle;
+  if (sites.length === 0 && !cycle?.enabled) return null;
+
+  return (
+    <section className="space-y-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-base font-semibold text-bai-fg">Production health</h3>
+        {cycle?.enabled ? (
+          <span className="text-[10px] text-bai-mute">
+            Auto-cycle on{cycle.lastRunAt ? ` · last run ${new Date(cycle.lastRunAt).toLocaleDateString()}` : ""}
+          </span>
+        ) : null}
+      </div>
+      {sites.length === 0 ? (
+        <p className="rounded-md border border-bai-line/60 bg-bai-surface/20 px-3 py-2 text-xs text-bai-mute">
+          No site checks yet — the worker probes all project domains every 30 minutes.
+        </p>
+      ) : (
+        <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3 xl:grid-cols-4">
+          {sites.map((site) => (
+            <a
+              key={site.projectId}
+              href={`https://${site.domain}`}
+              target="_blank"
+              rel="noreferrer"
+              className={`rounded-md border px-2.5 py-2 text-xs transition-colors ${
+                site.ok
+                  ? "border-emerald-500/25 bg-emerald-500/5 hover:border-emerald-500/50"
+                  : "border-red-500/40 bg-red-500/10 hover:border-red-500/60"
+              }`}
+            >
+              <div className="flex items-center gap-1.5">
+                <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${site.ok ? "bg-emerald-400" : "bg-red-500 animate-pulse"}`} />
+                <span className="truncate font-medium text-bai-fg">{site.domain}</span>
+              </div>
+              <p className="mt-1 text-[10px] tabular-nums text-bai-mute">
+                {site.ok ? `${site.httpStatus} · ${site.responseMs}ms` : (site.error ?? `HTTP ${site.httpStatus}`)}
+              </p>
+            </a>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function AutonomySettings({ projects }: { projects: Project[] }) {
+  const qc = useQueryClient();
+  const setAutonomy = useMutation({
+    mutationFn: async ({ id, autonomy }: { id: string; autonomy: string }) =>
+      apiWrite(`/api/projects/${id}/autonomy`, {
+        method: "PUT",
+        body: JSON.stringify({ autonomy }),
+      }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["projects"] }),
+  });
+
+  if (projects.length === 0) return null;
+
+  return (
+    <section className="space-y-3">
+      <div>
+        <p className="text-[11px] leading-relaxed text-bai-mute">
+          <span className="text-bai-fg">manual</span> — you approve every PR ·{" "}
+          <span className="text-amber-300">auto-safe</span> — green CI + small diff + no sensitive files merges itself ·{" "}
+          <span className="text-red-300">full</span> — green CI merges itself. Auto-merged deploys are probed and
+          incidents are filed automatically.
+        </p>
+      </div>
+      <div className="space-y-1.5">
+        {projects.map((p) => (
+          <div key={p.id} className="flex flex-wrap items-center gap-2 rounded-md border border-bai-line/70 bg-bai-bg/30 px-2.5 py-2">
+            <DomainBadge domain={p.domain} repo={p.repo} size="xs" />
+            <span className="min-w-0 flex-1 truncate text-xs font-medium text-bai-fg">{p.name}</span>
+            <div className="flex gap-1">
+              {(["manual", "auto-safe", "full"] as const).map((level) => {
+                const active = (p.autonomy ?? "manual") === level;
+                return (
+                  <button
+                    key={level}
+                    type="button"
+                    disabled={setAutonomy.isPending}
+                    onClick={() => setAutonomy.mutate({ id: p.id, autonomy: level })}
+                    className={`rounded-full px-2 py-0.5 text-[10px] transition-colors ${
+                      active
+                        ? level === "manual"
+                          ? "bg-bai-surface text-bai-fg border border-bai-mute/50"
+                          : level === "auto-safe"
+                            ? "bg-amber-400/20 text-amber-300 border border-amber-400/40"
+                            : "bg-red-400/20 text-red-300 border border-red-400/40"
+                        : "border border-bai-line text-bai-mute hover:text-bai-fg"
+                    }`}
+                  >
+                    {level}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+      {setAutonomy.isError ? <p className="text-xs text-red-400">{(setAutonomy.error as Error).message}</p> : null}
+    </section>
   );
 }
 
@@ -1539,6 +1665,7 @@ const STAGES: { key: TaskStage; label: string; tone: string }[] = [
   { key: "agent:implementing", label: "Build", tone: "border-bai-metal" },
   { key: "agent:validating", label: "Validate", tone: "border-violet-400/80" },
   { key: "agent:review", label: "In review", tone: "border-bai-orange-deep" },
+  { key: "agent:blocked", label: "Blocked", tone: "border-red-500/80" },
   { key: "done", label: "Done", tone: "border-bai-line" },
 ];
 
@@ -1604,6 +1731,15 @@ function TaskCard({
   const dismiss = useMutation({
     mutationFn: async () =>
       apiWrite("/api/tasks/dismiss", {
+        method: "POST",
+        body: JSON.stringify({ project: projectId, issueNumber: task.number }),
+      }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["board"] }),
+  });
+
+  const unblock = useMutation({
+    mutationFn: async () =>
+      apiWrite("/api/tasks/unblock", {
         method: "POST",
         body: JSON.stringify({ project: projectId, issueNumber: task.number }),
       }),
@@ -1710,6 +1846,22 @@ function TaskCard({
       ) : null}
       {PIPELINE_ACTIVE.includes(task.stage) && !activeRun ? (
         <p className="mt-1.5 text-[9px] text-bai-mute/70">In pipeline — check GitHub</p>
+      ) : null}
+      {task.stage === "agent:blocked" ? (
+        <div className="mt-1.5 space-y-1 border-t border-red-500/30 pt-1.5">
+          <p className="text-[9px] leading-snug text-red-300/90">
+            Failed repeatedly — fix the task or the repo, then retry.
+          </p>
+          <button
+            type="button"
+            disabled={unblock.isPending}
+            onClick={() => unblock.mutate()}
+            className="w-full rounded border border-red-400/40 bg-red-400/10 px-1.5 py-1 text-[10px] font-semibold text-red-300 hover:bg-red-400/20 disabled:opacity-50"
+          >
+            {unblock.isPending ? "Requeueing…" : "↻ Retry (back to Ready)"}
+          </button>
+          {unblock.isError ? <p className="text-[10px] text-red-400">{(unblock.error as Error).message}</p> : null}
+        </div>
       ) : null}
       {task.stage === "agent:idea" ? (
         <div className="mt-1.5 space-y-1 border-t border-bai-line/60 pt-1.5">
@@ -2283,6 +2435,8 @@ function DashboardView({
           </p>
         ) : null}
       </section>
+
+      <SitesPanel />
     </div>
   );
 }
@@ -2741,6 +2895,13 @@ function BaiDigitalOffice() {
         {tab === "settings" ? (
           <div className="mx-auto max-w-3xl space-y-10">
             <WriteSecretSettings />
+            <section>
+              <h3 className="mb-1 text-sm font-semibold text-bai-fg">Autonomy per project</h3>
+              <p className="mb-3 text-xs text-bai-mute">
+                How much the company ships without you. Start with auto-safe on low-risk projects.
+              </p>
+              <AutonomySettings projects={projects} />
+            </section>
             <section>
               <h3 className="mb-1 text-sm font-semibold text-bai-fg">All agents</h3>
               <p className="mb-4 text-xs text-bai-mute">

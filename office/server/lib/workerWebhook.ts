@@ -32,6 +32,50 @@ export async function notifyWorkerConfig(config: unknown): Promise<{ ok: boolean
   return postWorker(`${base}/config`, config);
 }
 
+/** Forward a budget change so the worker (which enforces budgets) has the truth. */
+export async function notifyWorkerBudget(input: {
+  project: string;
+  dailyUsd?: number | null;
+  monthlyUsd?: number | null;
+  totalUsd?: number | null;
+}): Promise<{ ok: boolean; skipped?: string }> {
+  const base = workerBaseUrl();
+  if (!base) return { ok: false, skipped: "WORKER_WEBHOOK_URL not set" };
+  return postWorker(`${base}/budgets`, input);
+}
+
+/** Forward the project registry so worker polling covers new projects. */
+export async function notifyWorkerProjects(projects: unknown): Promise<{ ok: boolean; skipped?: string }> {
+  const base = workerBaseUrl();
+  if (!base) return { ok: false, skipped: "WORKER_WEBHOOK_URL not set" };
+  return postWorker(`${base}/projects`, { projects });
+}
+
+export interface WorkerState {
+  dispatches?: unknown[];
+  spend?: unknown;
+  sites?: unknown[];
+  autoCycle?: unknown;
+}
+
+/** Read live state (runs, spend, site checks) from the 24/7 worker — the
+ * durable source of truth when the API host is serverless. */
+export async function fetchWorkerState(): Promise<WorkerState | null> {
+  const base = workerBaseUrl();
+  if (!base) return null;
+  const secret = String(process.env.WORKER_SECRET || "").trim();
+  try {
+    const res = await fetch(`${base}/state`, {
+      headers: secret ? { Authorization: `Bearer ${secret}` } : {},
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as WorkerState;
+  } catch {
+    return null;
+  }
+}
+
 function workerBaseUrl(): string {
   const raw = String(process.env.WORKER_WEBHOOK_URL || "").trim().replace(/\/$/, "");
   if (!raw) return "";

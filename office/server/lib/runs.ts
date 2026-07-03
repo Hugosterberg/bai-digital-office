@@ -7,7 +7,7 @@ import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AGENT_PROVIDERS, normalizeProviderId, type AgentProviderId } from "./agents.ts";
-import { findProjectByRepo, PROJECTS, type Project } from "./projects.ts";
+import { listProjects, findProjectByRepo, type Project } from "./projects.ts";
 import { budgetStatusForProjects, type ProjectBudgetStatus } from "./budgets.ts";
 import type { PipelineStageId } from "./pipeline.ts";
 
@@ -165,7 +165,7 @@ export function spendSummary(): SpendSummary {
   let todayUsd = 0;
   let runs = 0;
 
-  for (const project of PROJECTS) {
+  for (const project of listProjects()) {
     projectBuckets.set(project.id, emptyBucket());
   }
 
@@ -201,7 +201,7 @@ export function spendSummary(): SpendSummary {
     if (isToday) todayUsd += cost;
   }
 
-  const byProject = PROJECTS.map((p) => projectRow(p, projectBuckets.get(p.id)!)).sort(
+  const byProject = listProjects().map((p) => projectRow(p, projectBuckets.get(p.id) ?? emptyBucket())).sort(
     (a, b) => b.totalUsd - a.totalUsd
   );
   const budgets = budgetStatusForProjects(byProject);

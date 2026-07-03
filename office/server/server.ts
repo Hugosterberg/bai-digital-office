@@ -19,7 +19,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { PROJECTS, findProject } from "./lib/projects.ts";
+import { listProjects, findProject, upsertProject, removeProject, setProjectAutonomy } from "./lib/projects.ts";
 import {
   githubConfigured,
   listTasks,
@@ -29,6 +29,7 @@ import {
   mergePullRequest,
   promoteIdeaToReady,
   dismissIdea,
+  setIssueStage,
 } from "./lib/github.ts";
 import { agentCatalog } from "./lib/agents.ts";
 import {
@@ -56,7 +57,18 @@ import {
 } from "./lib/dispatch.ts";
 import { startAgentPoller } from "./lib/agentPoller.ts";
 import { requireWriteAuth } from "./lib/auth.ts";
-import { notifyWorkerPoll, notifyWorkerSpecialist, notifyWorkerConfig, workerConfigured } from "./lib/workerWebhook.ts";
+import {
+  notifyWorkerPoll,
+  notifyWorkerSpecialist,
+  notifyWorkerConfig,
+  notifyWorkerBudget,
+  notifyWorkerProjects,
+  fetchWorkerState,
+  workerConfigured,
+} from "./lib/workerWebhook.ts";
+import { notify, notificationsConfigured } from "./lib/notify.ts";
+import { startSiteMonitor, listSiteStatuses, checkAllSites } from "./lib/siteMonitor.ts";
+import { autoCycleStatus } from "./lib/autoCycle.ts";
 
 dotenv.config({ path: [".env.local", ".env"] });
 
@@ -70,6 +82,7 @@ app.get("/api/health", (_req, res) => {
     github: githubConfigured(),
     dispatch: dispatchAvailable(),
     worker: workerConfigured(),
+    notifications: notificationsConfigured(),
     runningAgents: runningDispatchCount(),
     autoPoll: process.env.AGENT_POLL_ENABLED === "true",
     writeAuthRequired: Boolean(String(process.env.OFFICE_SECRET || "").trim()),
@@ -78,11 +91,62 @@ app.get("/api/health", (_req, res) => {
 
 app.get("/api/projects", (_req, res) => {
   res.json({
-    projects: PROJECTS,
+    projects: listProjects(),
     github: githubConfigured(),
     dispatch: dispatchAvailable(),
     worker: workerConfigured(),
   });
+});
+
+/** Add or update a project in the portfolio (runtime registry). */
+app.put("/api/projects", requireWriteAuth, (req, res) => {
+  try {
+    const project = upsertProject(req.body as Record<string, unknown>);
+    void notifyWorkerProjects(listProjects());
+    res.json({ ok: true, project, projects: listProjects() });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : "Could not save project." });
+  }
+});
+
+/** Set autonomy level: manual | auto-safe | full. */
+app.put("/api/projects/:id/autonomy", requireWriteAuth, (req, res) => {
+  const level = String(req.body?.autonomy || "");
+  if (level !== "manual" && level !== "auto-safe" && level !== "full") {
+    return res.status(400).json({ error: "autonomy must be manual, auto-safe, or full." });
+  }
+  try {
+    const project = setProjectAutonomy(String(req.params.id || ""), level);
+    void notifyWorkerProjects(listProjects());
+    res.json({ ok: true, project });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : "Could not set autonomy." });
+  }
+});
+
+app.delete("/api/projects/:id", requireWriteAuth, (req, res) => {
+  const id = String(req.params.id || "").trim();
+  if (!findProject(id)) return res.status(404).json({ error: "Unknown project." });
+  removeProject(id);
+  void notifyWorkerProjects(listProjects());
+  res.json({ ok: true, projects: listProjects() });
+});
+
+/** Site monitor status — local checks, or the worker's when this host is serverless. */
+app.get("/api/sites", async (_req, res) => {
+  if (!dispatchAvailable() && workerConfigured()) {
+    const state = await fetchWorkerState();
+    if (state?.sites) {
+      return res.json({ sites: state.sites, autoCycle: state.autoCycle ?? null, source: "worker" });
+    }
+  }
+  res.json({ sites: listSiteStatuses(), autoCycle: autoCycleStatus(), source: "local" });
+});
+
+/** Run a site check across all domains right now. */
+app.post("/api/sites/check", requireWriteAuth, async (_req, res) => {
+  const sites = await checkAllSites();
+  res.json({ ok: true, sites });
 });
 
 app.get("/api/agents", (_req, res) => {
@@ -190,7 +254,7 @@ app.get("/api/board", async (req, res) => {
     return res.status(503).json({ error: "GITHUB_TOKEN is not set — add it to .env.local." });
   }
   const projectId = String(req.query.project || "").trim();
-  const projects = projectId ? [findProject(projectId)].filter(Boolean) : PROJECTS;
+  const projects = projectId ? [findProject(projectId)].filter(Boolean) : listProjects();
   try {
     const boards = await Promise.all(
       projects.map(async (project) => {
@@ -303,7 +367,31 @@ app.post("/api/tasks/promote", requireWriteAuth, async (req, res) => {
   const result = await promoteIdeaToReady(project.repo, issueNumber);
   if (!result.ok) return res.status(result.status).json({ error: result.message });
   void notifyWorkerPoll("idea-promoted");
+  void notify({
+    kind: "idea-promoted",
+    repo: project.repo,
+    issueNumber,
+    title: String(req.body?.title || `#${issueNumber}`),
+    by: "human (office)",
+  });
   res.json({ ok: true, message: "Idea promoted to agent:ready." });
+});
+
+/** Unblock a failed task: agent:blocked → agent:ready with attempts cleared. */
+app.post("/api/tasks/unblock", requireWriteAuth, async (req, res) => {
+  if (!githubConfigured()) {
+    return res.status(503).json({ error: "GITHUB_TOKEN is not set." });
+  }
+  const project = findProject(String(req.body?.project || ""));
+  const issueNumber = Number(req.body?.issueNumber);
+  if (!project) return res.status(400).json({ error: "Unknown project." });
+  if (!Number.isInteger(issueNumber) || issueNumber < 1) {
+    return res.status(400).json({ error: "issueNumber is required." });
+  }
+  const result = await setIssueStage(project.repo, issueNumber, "agent:ready", { attempts: null });
+  if (!result.ok) return res.status(502).json({ error: result.message });
+  void notifyWorkerPoll("task-unblocked");
+  res.json({ ok: true, message: "Task unblocked — back in the agent queue." });
 });
 
 /** Dismiss an agent:idea (close issue). */
@@ -346,7 +434,7 @@ app.post("/api/prs/merge", requireWriteAuth, async (req, res) => {
   if (!repo || !Number.isInteger(number)) {
     return res.status(400).json({ error: "repo and number are required." });
   }
-  const project = PROJECTS.find((p) => p.repo === repo);
+  const project = listProjects().find((p) => p.repo === repo);
   if (!project) {
     return res.status(400).json({ error: "Unknown repo — not in portfolio." });
   }
@@ -363,8 +451,15 @@ app.post("/api/prs/merge", requireWriteAuth, async (req, res) => {
   });
 });
 
-app.get("/api/dispatches", (_req, res) => {
-  res.json({ dispatches: listDispatches(), spend: spendSummary() });
+app.get("/api/dispatches", async (_req, res) => {
+  // Serverless host: the Railway worker holds the durable run log — prefer it.
+  if (!dispatchAvailable() && workerConfigured()) {
+    const state = await fetchWorkerState();
+    if (state?.dispatches && state?.spend) {
+      return res.json({ dispatches: state.dispatches, spend: state.spend, source: "worker" });
+    }
+  }
+  res.json({ dispatches: listDispatches(), spend: spendSummary(), source: "local" });
 });
 
 /** Log a run done outside office auto-dispatch (Cursor, interactive Claude, API). */
@@ -406,6 +501,12 @@ app.put("/api/budgets", requireWriteAuth, (req, res) => {
       monthlyUsd: req.body?.monthlyUsd != null ? Number(req.body.monthlyUsd) : undefined,
       totalUsd: req.body?.totalUsd != null ? Number(req.body.totalUsd) : undefined,
     });
+    void notifyWorkerBudget({
+      project: projectId,
+      dailyUsd: req.body?.dailyUsd != null ? Number(req.body.dailyUsd) : undefined,
+      monthlyUsd: req.body?.monthlyUsd != null ? Number(req.body.monthlyUsd) : undefined,
+      totalUsd: req.body?.totalUsd != null ? Number(req.body.totalUsd) : undefined,
+    });
     const status = budgetStatusForProjects(spendSummary().byProject).find((b) => b.projectId === projectId);
     res.json({ ok: true, config, status });
   } catch (err) {
@@ -428,6 +529,7 @@ export default app;
 const isDirectRun = process.argv[1]?.replace(/\\/g, "/").endsWith("server/server.ts");
 if (isDirectRun) {
   startAgentPoller(Number(process.env.AGENT_POLL_INTERVAL_MS) || 90_000);
+  startSiteMonitor();
   const PORT = process.env.PORT || 3001;
   app.listen(PORT, () => console.log(`bai digital office api on :${PORT}`));
 }

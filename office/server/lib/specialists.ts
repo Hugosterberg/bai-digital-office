@@ -3,7 +3,6 @@
  * growth: creative feature ideas · research: market & gap analysis
  */
 
-import { spawn } from "node:child_process";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,20 +11,9 @@ import { findProjectByRepo } from "./projects.ts";
 import { overBudgetMessage } from "./budgets.ts";
 import { persistRun, spendSummary, type AgentRun } from "./runs.ts";
 import { dispatchAvailable, runningDispatchCount, registerDispatch } from "./dispatch.ts";
+import { runClaude } from "./claude.ts";
 
 const MAX_TAIL = 4_000;
-const AGENT_ALLOWED_TOOLS = [
-  "Bash(git:*)",
-  "Bash(gh:*)",
-  "Bash(npm:*)",
-  "Bash(npx:*)",
-  "Bash(node:*)",
-  "Edit",
-  "Write",
-  "Read",
-  "Glob",
-  "Grep",
-].join(",");
 
 const IDEA_MARKER = "<!-- bai:idea -->";
 
@@ -71,43 +59,6 @@ function researchPrompt(repo: string, focus: string, settings: ReturnType<typeof
     `Rules: separate facts from hypotheses; no code changes; no PRs.`,
     `Finish by printing the summary issue URL.`,
   ].join("\n");
-}
-
-function runClaude(workdir: string, prompt: string, model: string): Promise<{
-  ok: boolean;
-  costUsd?: number;
-  durationMs?: number;
-  resultSummary?: string;
-  outputTail?: string;
-}> {
-  return new Promise((resolve) => {
-    const cmd = `claude -p --output-format json --permission-mode acceptEdits --model "${model}" --allowedTools "${AGENT_ALLOWED_TOOLS}"`;
-    const child = spawn(cmd, { cwd: workdir, shell: true, windowsHide: true, env: process.env });
-    child.stdin?.end(prompt);
-    let stdoutBuf = "";
-    let stderrTail = "";
-    child.stdout?.on("data", (chunk: Buffer) => {
-      stdoutBuf = (stdoutBuf + chunk.toString()).slice(-200_000);
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      stderrTail = (stderrTail + chunk.toString()).slice(-MAX_TAIL);
-    });
-    child.on("error", (err) => resolve({ ok: false, outputTail: err.message }));
-    child.on("close", (code) => {
-      try {
-        const result = JSON.parse(stdoutBuf.slice(stdoutBuf.indexOf("{"))) as Record<string, unknown>;
-        resolve({
-          ok: !result.is_error && code === 0,
-          costUsd: Number(result.total_cost_usd) || undefined,
-          durationMs: Number(result.duration_ms) || undefined,
-          resultSummary: String(result.result || "").slice(0, 400),
-          outputTail: stderrTail,
-        });
-      } catch {
-        resolve({ ok: code === 0, outputTail: (stderrTail + stdoutBuf).slice(-MAX_TAIL) });
-      }
-    });
-  });
 }
 
 export function startSpecialistRun(input: {

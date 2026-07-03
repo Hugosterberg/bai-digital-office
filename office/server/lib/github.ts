@@ -25,6 +25,7 @@ export const STAGE_LABELS = [
   "agent:validating",
   "agent:review",
   "agent:idea",
+  "agent:blocked",
   "agent:building",
 ] as const;
 export type StageLabel = (typeof STAGE_LABELS)[number];
@@ -44,6 +45,7 @@ const LABEL_DEFINITIONS: Array<{ name: string; color: string; description: strin
   { name: "agent:building", color: "fbca04", description: "Legacy — agent working (use agent:implementing)" },
   { name: "agent:review", color: "1d76db", description: "PR open — waiting for human review" },
   { name: "agent:idea", color: "e4e669", description: "Growth/research idea — promote to agent:ready when approved" },
+  { name: "agent:blocked", color: "b60205", description: "Pipeline failed repeatedly — needs human attention" },
 ];
 
 function token(): string {
@@ -318,11 +320,13 @@ export async function mergePullRequest(
   return { ok: true, sha: String(merged.sha || "") };
 }
 
-/** Move an issue to a pipeline stage label (preserves agent + prio labels). */
+/** Move an issue to a pipeline stage label (preserves agent + prio labels).
+ * `attempts`: number → set attempts:N label; null → clear it; undefined → keep as-is. */
 export async function setIssueStage(
   repo: string,
   issueNumber: number,
-  stage: StageLabel
+  stage: StageLabel,
+  opts?: { attempts?: number | null }
 ): Promise<{ ok: true } | { ok: false; message: string }> {
   const view = await gh(`/repos/${repo}/issues/${issueNumber}`);
   if (!view.ok) {
@@ -332,8 +336,16 @@ export async function setIssueStage(
     ? (view.data as Record<string, unknown>).labels
     : []) as Array<Record<string, unknown>>;
   const names = labels.map((l) => String(l.name || "")).filter(Boolean);
-  const keep = names.filter((n) => n === AGENT_LABEL || n.startsWith("prio:"));
+  const keep = names.filter(
+    (n) =>
+      n === AGENT_LABEL ||
+      n.startsWith("prio:") ||
+      (opts?.attempts === undefined && n.startsWith("attempts:"))
+  );
   const next = [...new Set([...keep, stage])];
+  if (typeof opts?.attempts === "number" && opts.attempts > 0) {
+    next.push(`attempts:${opts.attempts}`);
+  }
   const res = await gh(`/repos/${repo}/issues/${issueNumber}`, {
     method: "PATCH",
     body: JSON.stringify({ labels: next }),
@@ -343,6 +355,23 @@ export async function setIssueStage(
     return { ok: false, message };
   }
   return { ok: true };
+}
+
+/** Current stage label + failed-attempt count for an issue. */
+export async function getIssueState(
+  repo: string,
+  issueNumber: number
+): Promise<{ stage: StageLabel | null; attempts: number } | null> {
+  const view = await gh(`/repos/${repo}/issues/${issueNumber}`);
+  if (!view.ok) return null;
+  const labels = (Array.isArray((view.data as Record<string, unknown>).labels)
+    ? (view.data as Record<string, unknown>).labels
+    : []) as Array<Record<string, unknown>>;
+  const names = labels.map((l) => String(l.name || "")).filter(Boolean);
+  const stage = STAGE_LABELS.find((s) => names.includes(s)) ?? null;
+  const attemptsLabel = names.find((n) => n.startsWith("attempts:"));
+  const attempts = attemptsLabel ? Number(attemptsLabel.slice("attempts:".length)) || 0 : 0;
+  return { stage, attempts };
 }
 
 export async function commentOnIssue(
@@ -395,4 +424,82 @@ export async function dismissIdea(
     };
   }
   return { ok: true };
+}
+
+/** Open PR that references the issue via "Closes #N" (validate-agent convention). */
+export async function findOpenPrForIssue(
+  repo: string,
+  issueNumber: number
+): Promise<{ number: number; url: string } | null> {
+  const res = await gh(`/repos/${repo}/pulls?state=open&per_page=30`);
+  const rows = (Array.isArray(res.data) ? res.data : []) as Array<Record<string, unknown>>;
+  const pattern = new RegExp(`(closes|fixes|resolves)\\s+#${issueNumber}\\b`, "i");
+  const hit = rows.find((r) => pattern.test(String(r.body || "")));
+  return hit ? { number: Number(hit.number), url: String(hit.html_url || "") } : null;
+}
+
+/** Changed files on a PR — for auto-merge safety checks. */
+export async function listPullRequestFiles(
+  repo: string,
+  number: number
+): Promise<Array<{ filename: string; additions: number; deletions: number }>> {
+  const res = await gh(`/repos/${repo}/pulls/${number}/files?per_page=100`);
+  const rows = (Array.isArray(res.data) ? res.data : []) as Array<Record<string, unknown>>;
+  return rows.map((r) => ({
+    filename: String(r.filename || ""),
+    additions: Number(r.additions) || 0,
+    deletions: Number(r.deletions) || 0,
+  }));
+}
+
+/** Find an open agent issue whose title starts with the given prefix (dedup for incidents). */
+export async function findOpenIssueByTitlePrefix(
+  repo: string,
+  prefix: string
+): Promise<{ number: number; url: string } | null> {
+  const res = await gh(`/repos/${repo}/issues?labels=${AGENT_LABEL}&state=open&per_page=50`);
+  const rows = (Array.isArray(res.data) ? res.data : []) as Array<Record<string, unknown>>;
+  const hit = rows.find((r) => !r.pull_request && String(r.title || "").startsWith(prefix));
+  return hit ? { number: Number(hit.number), url: String(hit.html_url || "") } : null;
+}
+
+/** Create a high-priority agent:ready issue (incidents, auto-detected bugs). */
+export async function createAgentIssue(input: {
+  repo: string;
+  title: string;
+  body: string;
+  stage?: StageLabel;
+  priority?: "low" | "medium" | "high";
+}): Promise<{ ok: true; number: number; url: string } | { ok: false; status: number; message: string }> {
+  await ensureLabels(input.repo);
+  const res = await gh(`/repos/${input.repo}/issues`, {
+    method: "POST",
+    body: JSON.stringify({
+      title: input.title,
+      body: input.body,
+      labels: [AGENT_LABEL, input.stage ?? "agent:ready", `prio:${input.priority ?? "high"}`],
+    }),
+  });
+  if (!res.ok) {
+    return {
+      ok: false,
+      status: res.status,
+      message: String((res.data as Record<string, unknown> | null)?.message || "Could not create issue."),
+    };
+  }
+  const created = res.data as Record<string, unknown>;
+  return { ok: true, number: Number(created.number), url: String(created.html_url || "") };
+}
+
+/** Comment on an issue and close it (incident recovery). */
+export async function closeIssueWithComment(
+  repo: string,
+  issueNumber: number,
+  comment: string
+): Promise<void> {
+  await commentOnIssue(repo, issueNumber, comment);
+  await gh(`/repos/${repo}/issues/${issueNumber}`, {
+    method: "PATCH",
+    body: JSON.stringify({ state: "closed" }),
+  });
 }
