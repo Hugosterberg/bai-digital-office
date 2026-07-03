@@ -538,7 +538,7 @@ function ProjectBoard({ board }: { board: Board }) {
 
 /* ── shell ───────────────────────────────────────────────────── */
 
-function MissionControl() {
+function BaiDigitalOffice() {
   const [formProject, setFormProject] = useState<string | null>(null);
   const projectsQuery = useQuery({
     queryKey: ["projects"],
@@ -635,7 +635,7 @@ function MissionControl() {
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <MissionControl />
+      <BaiDigitalOffice />
     </QueryClientProvider>
   );
 }

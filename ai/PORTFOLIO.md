@@ -17,7 +17,7 @@ _One row per project. Status: idea / building / live / parked. Last updated: 202
 | **pump** | building | [Hugosterberg/pump](https://github.com/Hugosterberg/pump) | `c:\Code\pump` | — | Portal/site | "Portable Utilities Made Perfect" — product brand. |
 | **pump-shopify** | building | [Hugosterberg/pump-shopify](https://github.com/Hugosterberg/pump-shopify) | `c:\Code\pump-shopify` | — | Shopify theme (Liquid) | Pump's storefront theme. |
 | **los-tios** | parked | [Hugosterberg/los-tios](https://github.com/Hugosterberg/los-tios) | `c:\Code\los-tios` | — | Vite + React | Los Tios. |
-| **mission-control** | building | `bai-digital-office/mission-control` (local until org exists) | `c:\Code\bai-digital-office\mission-control` | local tool | React + Express over GitHub API | Agent cockpit: task queue = GitHub Issues, review board = PRs. |
+| **bai digital office** | building | [Hugosterberg/bai-digital-office](https://github.com/Hugosterberg/bai-digital-office) (`office/`) | `c:\Code\bai-digital-office\office` | [baidigital.office.xyz](https://baidigital.office.xyz) | React + Express over GitHub API | Agent cockpit: task queue = GitHub Issues, review board = PRs. |
 | **bai-repo-engineer** (CMA agent) | live | agent folder `c:\Code\launch-your-agent\my-agent` | see left | — | Anthropic CMA (workspace `automazing`) | First AI employee; rubric-graded. |
 | **invest** | idea | `bai-digital-office/invest` (from template-webapp) | — | — | TBD | Investment leg; LunarCrush/Quartr MCP. |
 
@@ -28,11 +28,11 @@ _One row per project. Status: idea / building / live / parked. Last updated: 202
 2. Read that repo's `AGENTS.md` + `ai/` folder if present; older repos may
    lack them — then the company PLAYBOOK still applies in full.
 3. Deliver on a `feat/<slug>` branch → PR → Hugo reviews and merges.
-4. The task queue per repo: issues labeled `agent:ready` (see mission-control).
+4. The task queue per repo: issues labeled `agent:ready` (see bai digital office / `office/`).
 
 ## Adding a project
 
 1. Create the repo from `bai-digital-office/template-webapp` ("Use this template").
-2. Add its row here AND to `mission-control/server/lib/projects.ts`.
+2. Add its row here AND to `office/server/lib/projects.ts`.
 3. Create its Vercel project (+ Supabase project if it has data).
 4. Point its `ai/README.md` back to this brain.

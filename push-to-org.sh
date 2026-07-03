@@ -24,7 +24,7 @@ push_repo() { # <local-dir> <repo-name> <description>
 push_repo ai ai "Company brain: vision, playbook, portfolio, agent definitions"
 push_repo dot-github ".github" "Org defaults: PR template, workflow templates, profile"
 push_repo template-webapp template-webapp "Product starter: React+Vite+Express, vertical slices, agent workflow prewired"
-push_repo mission-control mission-control "Agent cockpit: task queue over GitHub Issues + human review board"
+push_repo office office "bai digital office — agent cockpit: task queue over GitHub Issues + PR review"
 
 # Mark the starter as a template repo + protect its main branch.
 gh api -X PATCH "repos/$ORG/template-webapp" -f is_template=true >/dev/null && echo "✓ template flag set"

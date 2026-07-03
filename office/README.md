@@ -1,14 +1,13 @@
-# bai digital office (mission control)
+# bai digital office
 
-The task board is branded **bai digital office**, styled after
-[baidigital.xyz](https://baidigital.xyz) (near-black `#050505`, warm off-white
+The agent cockpit at [baidigital.office.xyz](https://baidigital.office.xyz) —
+styled after [baidigital.xyz](https://baidigital.xyz) (near-black `#050505`, warm off-white
 `#f5f2ea`, orange accent `#f7931a`, Geist type — see the `bai` palette in
 `tailwind.config.ts`).
 
-BAI Digital's cockpit for the agent workforce: **write a well-described task →
-it becomes a GitHub issue labeled `agent:ready` → an agent picks it up →
-you review the PR.** No database — GitHub Issues are the queue, PRs are the
-review surface.
+Write a well-described task → it becomes a GitHub issue labeled `agent:ready` →
+an agent picks it up → you review the PR. No database — GitHub Issues are the
+queue, PRs are the review surface.
 
 ## The task lifecycle
 
@@ -51,11 +50,11 @@ npm run worker
 Open PRs show on the board with CI status. Click **Approve → prod** to squash-merge
 to `main`. Vercel deploys production automatically when each product repo is linked.
 
-## Deploy (baidigital.office.com)
+## Deploy (baidigital.office.xyz)
 
-1. Deploy `mission-control` to Vercel (root directory = `mission-control`).
-2. Env vars: `GITHUB_TOKEN`, `MISSION_CONTROL_SECRET`, `DISPATCH_DISABLED=true` (Vercel has no Claude CLI).
-3. Point DNS `baidigital.office.com` at the Vercel project.
+1. Deploy this folder (`office/`) to Vercel — set **Root Directory** to `office` in the repo import.
+2. Env vars: `GITHUB_TOKEN`, `OFFICE_SECRET`, `DISPATCH_DISABLED=true` (Vercel has no Claude CLI).
+3. Point DNS `baidigital.office.xyz` at the Vercel project.
 4. Run `npm run worker` on your machine (or a small VPS) for agent dispatch — the UI and merge API work from Vercel.
 
 Projects shown on the board are defined in `server/lib/projects.ts` —

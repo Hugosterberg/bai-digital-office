@@ -2,8 +2,8 @@
   "name": "bai-digital-office",
   "private": true,
   "scripts": {
-    "dev": "npm --prefix mission-control run dev",
-    "build": "npm --prefix mission-control run build",
-    "verify": "npm --prefix mission-control run verify"
+    "dev": "npm --prefix office run dev",
+    "build": "npm --prefix office run build",
+    "verify": "npm --prefix office run verify"
   }
 }

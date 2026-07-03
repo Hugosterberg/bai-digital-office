@@ -1,5 +1,5 @@
 /**
- * Agent dispatch — the "self-driving" part of Mission Control.
+ * Agent dispatch — the "self-driving" part of bai digital office.
  *
  * Dispatching a ready task spawns a headless Claude Code run (`claude -p`)
  * on this machine with the full BAI agent contract: read the issue, clone

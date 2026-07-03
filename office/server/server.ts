@@ -1,5 +1,5 @@
 /**
- * Mission Control API — GitHub Issues = task queue, PRs = review queue.
+ * bai digital office API — GitHub Issues = task queue, PRs = review queue.
  *
  *   GET  /api/projects   — project registry
  *   GET  /api/board      — kanban + open PRs
