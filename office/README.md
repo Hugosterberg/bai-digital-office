@@ -43,8 +43,9 @@ You → baidigital.office.xyz → GitHub issue (agent:ready)
 ## Deploy Railway (agents)
 
 1. [railway.app](https://railway.app) → New Project → Deploy from GitHub → repo `bai-digital-office`.
-2. **Root Directory** = `office`.
-3. Settings → Build → Dockerfile path: **`Dockerfile.worker`** (or use `railway.toml`).
+2. Service **`bai-digital-office`** → **Settings → Root Directory** = `office` (**important**).
+3. **Settings → Build** → Builder: **Dockerfile** → path: `Dockerfile.worker`  
+   (If Root Directory is blank/repo root, use root `Dockerfile.worker` instead — Railpack will fail without a start script.)
 4. Generate a public domain (Settings → Networking).
 5. Environment variables:
 

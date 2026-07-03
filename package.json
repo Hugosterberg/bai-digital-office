@@ -4,6 +4,7 @@
   "scripts": {
     "dev": "npm --prefix office run dev",
     "build": "npm --prefix office run build",
-    "verify": "npm --prefix office run verify"
+    "verify": "npm --prefix office run verify",
+    "start": "npm --prefix office run worker"
   }
 }
