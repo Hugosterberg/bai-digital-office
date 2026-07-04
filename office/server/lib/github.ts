@@ -260,6 +260,7 @@ export async function getPullRequestCheckStatus(
 
 export interface PullRequestDetail extends ReviewPr {
   body: string;
+  baseRef: string;
   checks: PrCheckStatus;
 }
 
@@ -283,14 +284,40 @@ export async function getPullRequestDetail(
     mergeable: raw.mergeable == null ? null : Boolean(raw.mergeable),
     merged: Boolean(raw.merged),
     body: String(raw.body || ""),
+    baseRef: String((raw.base as Record<string, unknown> | null)?.ref || ""),
     checks,
   };
 }
 
-export async function mergePullRequest(
+/** How many commits the PR head is behind its base branch (0 = up to date). */
+async function branchBehindBy(repo: string, baseRef: string, headSha: string): Promise<number> {
+  if (!baseRef || !headSha) return 0;
+  const res = await gh(`/repos/${repo}/compare/${baseRef}...${headSha}`);
+  if (!res.ok) return 0;
+  return Number((res.data as Record<string, unknown>).behind_by) || 0;
+}
+
+/** Merge latest base into the PR branch (GitHub "Update branch" button). */
+export async function updatePullRequestBranch(
   repo: string,
   number: number
-): Promise<{ ok: true; sha: string } | { ok: false; status: number; message: string }> {
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  const res = await gh(`/repos/${repo}/pulls/${number}/update-branch`, {
+    method: "PUT",
+    body: JSON.stringify({}),
+  });
+  if (!res.ok) {
+    const message = String((res.data as Record<string, unknown> | null)?.message || "Update branch failed.");
+    return { ok: false, message };
+  }
+  return { ok: true };
+}
+
+export type MergeResult =
+  | { ok: true; sha: string }
+  | { ok: false; status: number; message: string; code?: "updated-base" };
+
+export async function mergePullRequest(repo: string, number: number): Promise<MergeResult> {
   const detail = await getPullRequestDetail(repo, number);
   if (!detail) return { ok: false, status: 404, message: "Pull request not found." };
   if (detail.merged) return { ok: false, status: 409, message: "Pull request is already merged." };
@@ -298,6 +325,27 @@ export async function mergePullRequest(
   if (detail.mergeable === false) {
     return { ok: false, status: 409, message: "GitHub reports merge conflicts." };
   }
+
+  // Never merge a branch validated against an old main: update it first so CI
+  // re-runs on top of the latest base, then merge on a later attempt.
+  const behindBy = await branchBehindBy(repo, detail.baseRef, detail.headSha ?? "");
+  if (behindBy > 0) {
+    const updated = await updatePullRequestBranch(repo, number);
+    if (!updated.ok) {
+      return {
+        ok: false,
+        status: 409,
+        message: `Branch is ${behindBy} commit(s) behind ${detail.baseRef} and could not be updated automatically (${updated.message}). Resolve conflicts manually.`,
+      };
+    }
+    return {
+      ok: false,
+      status: 409,
+      code: "updated-base",
+      message: `Branch was ${behindBy} commit(s) behind ${detail.baseRef} — updated with latest ${detail.baseRef}. CI is re-running; merge again when green.`,
+    };
+  }
+
   if (detail.checks.state === "pending") {
     return { ok: false, status: 409, message: "CI checks still running — wait for green before merge." };
   }

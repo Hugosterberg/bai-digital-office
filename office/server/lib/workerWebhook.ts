@@ -58,6 +58,18 @@ export async function notifyWorkerCycle(projectId: string): Promise<{ ok: boolea
   return postWorker(`${base}/cycle`, { project: projectId });
 }
 
+/** Ask the worker to finish an approved merge once CI is green again
+ * (used when the PR branch was refreshed with latest main). */
+export async function notifyWorkerMergeWhenGreen(input: {
+  repo: string;
+  prNumber: number;
+  by: string;
+}): Promise<{ ok: boolean; skipped?: string }> {
+  const base = workerBaseUrl();
+  if (!base) return { ok: false, skipped: "WORKER_WEBHOOK_URL not set" };
+  return postWorker(`${base}/merge-when-green`, input);
+}
+
 export interface WorkerState {
   dispatches?: unknown[];
   spend?: unknown;

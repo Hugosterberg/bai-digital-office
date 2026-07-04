@@ -2211,7 +2211,7 @@ function PrReviewRow({ repo, pr, domain }: { repo: string; pr: ReviewPr; domain?
   const checks = detailQuery.data?.pr.checks;
   const merge = useMutation({
     mutationFn: async () =>
-      apiWrite<{ domain?: string | null; message?: string }>("/api/prs/merge", {
+      apiWrite<{ domain?: string | null; message?: string; pending?: boolean }>("/api/prs/merge", {
         method: "POST",
         body: JSON.stringify({ repo, number: pr.number }),
       }),
@@ -2270,7 +2270,13 @@ function PrReviewRow({ repo, pr, domain }: { repo: string; pr: ReviewPr; domain?
       >
         {merge.isPending ? "Merging…" : "✓ Approve → prod"}
       </button>
-      {merge.isSuccess ? <span className="text-[10px] text-emerald-400">Merged — deploying</span> : null}
+      {merge.isSuccess ? (
+        merge.data?.pending ? (
+          <span className="text-[10px] text-amber-300">Branch updated from main — merges when CI is green</span>
+        ) : (
+          <span className="text-[10px] text-emerald-400">Merged — deploying</span>
+        )
+      ) : null}
       {merge.isError ? <span className="text-[10px] text-red-400">{(merge.error as Error).message}</span> : null}
     </div>
   );

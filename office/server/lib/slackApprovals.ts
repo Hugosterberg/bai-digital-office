@@ -31,6 +31,8 @@ interface PendingApproval {
   issueNumber: number;
   title: string;
   createdAt: string;
+  /** Last merge-failure message replied to the thread — avoids repeating it every poll. */
+  lastError?: string;
 }
 
 function botToken(): string {
@@ -165,9 +167,14 @@ export async function pollSlackApprovals(): Promise<void> {
       } else if (result.status === 409 && /already merged/i.test(result.message)) {
         await reply(item, `PR #${item.prNumber} var redan mergad.`);
       } else {
-        await reply(item, `:warning: Kunde inte merga PR #${item.prNumber}: ${result.message}`);
-        // Keep watching — CI may finish or conflicts get fixed, then a re-check succeeds.
-        remaining.push(item);
+        // Keep watching and retry next poll — the branch may just have been
+        // updated with latest main (CI re-running) or a conflict gets fixed.
+        // Only post to the thread when the reason changes, not every 45s.
+        if (result.message !== item.lastError) {
+          const prefix = result.code === "updated-base" ? ":arrows_counterclockwise:" : ":warning:";
+          await reply(item, `${prefix} PR #${item.prNumber}: ${result.message}`);
+        }
+        remaining.push({ ...item, lastError: result.message });
       }
       continue;
     }

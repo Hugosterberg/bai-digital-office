@@ -64,11 +64,13 @@ import {
   notifyWorkerBudget,
   notifyWorkerProjects,
   notifyWorkerCycle,
+  notifyWorkerMergeWhenGreen,
   fetchWorkerState,
   workerConfigured,
 } from "./lib/workerWebhook.ts";
 import { notify, notificationsConfigured } from "./lib/notify.ts";
 import { startSiteMonitor, listSiteStatuses, checkAllSites, verifyDomainAfterDeploy } from "./lib/siteMonitor.ts";
+import { retryMergeUntilGreen } from "./lib/autoMerge.ts";
 import { autoCycleStatus, runCycleForProject } from "./lib/autoCycle.ts";
 import { startSlackApprovalPolling, slackApprovalsConfigured, listPendingApprovals } from "./lib/slackApprovals.ts";
 
@@ -490,6 +492,21 @@ app.post("/api/prs/merge", requireWriteAuth, async (req, res) => {
 
   const result = await mergePullRequest(repo, number);
   if (!result.ok) {
+    if (result.code === "updated-base") {
+      // Branch was refreshed with latest main. Finish the merge once CI is
+      // green again — on the worker when this host is serverless (a local
+      // background task would be frozen after the response is sent).
+      if (dispatchAvailable()) {
+        void retryMergeUntilGreen(repo, number, "godkänd i office");
+      } else {
+        void notifyWorkerMergeWhenGreen({ repo, prNumber: number, by: "godkänd i office" });
+      }
+      return res.status(202).json({
+        ok: false,
+        pending: true,
+        message: result.message + " Merging automatically once CI passes.",
+      });
+    }
     return res.status(result.status).json({ error: result.message });
   }
   void notify({ kind: "merged", repo, prNumber: number, by: "godkänd i office", domain: project.domain });

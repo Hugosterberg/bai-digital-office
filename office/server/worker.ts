@@ -16,6 +16,7 @@ import { listDispatches, spendSummary } from "./lib/dispatch.ts";
 import { setProjectBudget } from "./lib/budgets.ts";
 import { startSiteMonitor, listSiteStatuses } from "./lib/siteMonitor.ts";
 import { startAutoCycle, autoCycleStatus, runCycleForProject } from "./lib/autoCycle.ts";
+import { retryMergeUntilGreen } from "./lib/autoMerge.ts";
 import { startSlackApprovalPolling, listPendingApprovals } from "./lib/slackApprovals.ts";
 
 dotenv.config({ path: [".env.local", ".env"] });
@@ -139,6 +140,21 @@ const server = http.createServer((req, res) => {
         if (!project) return json(res, 400, { error: "Unknown project." });
         void runCycleForProject(project);
         json(res, 202, { ok: true, message: `Auto-cycle started for ${project.name}.` });
+      })
+      .catch((err) => json(res, 400, { error: err instanceof Error ? err.message : "Bad request" }));
+    return;
+  }
+
+  if (req.method === "POST" && url === "/merge-when-green") {
+    void readJsonBody(req)
+      .then((body) => {
+        const repo = String(body.repo || "").trim();
+        const prNumber = Number(body.prNumber);
+        if (!repo || !Number.isInteger(prNumber)) {
+          return json(res, 400, { error: "repo and prNumber are required." });
+        }
+        void retryMergeUntilGreen(repo, prNumber, String(body.by || "approved"));
+        json(res, 202, { ok: true, message: `Will merge ${repo}#${prNumber} once CI is green.` });
       })
       .catch((err) => json(res, 400, { error: err instanceof Error ? err.message : "Bad request" }));
     return;
