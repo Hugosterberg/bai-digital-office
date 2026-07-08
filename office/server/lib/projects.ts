@@ -23,12 +23,12 @@ export interface Project {
 }
 
 const DEFAULT_PROJECTS: Project[] = [
-  { id: "bai-digital-office", name: "bai digital office", repo: "Hugosterberg/bai-digital-office", domain: "office.baidigital.xyz" },
+  { id: "bai-digital-office", name: "bai digital office", repo: "Hugosterberg/bai-digital-office", domain: "baidigital.office.xyz" },
   { id: "automazing", name: "automazing", repo: "Hugosterberg/automazing-flow", domain: "automazing.life" },
   { id: "baidigital-site", name: "baidigital.xyz", repo: "Hugosterberg/bai-digital", domain: "baidigital.xyz" },
   { id: "bitcoinlivet", name: "bitcoinlivet", repo: "Hugosterberg/bitcoinlivet" },
   { id: "bra-erbjudanden", name: "bra-erbjudanden", repo: "Hugosterberg/bra-erbjudanden", domain: "braerbjudanden.se" },
-  { id: "smilo", name: "smilo", repo: "Hugosterberg/smilo" },
+  { id: "smilo", name: "smilo", repo: "Hugosterberg/smilo", domain: "smilo-flame.vercel.app" },
   { id: "pump", name: "pump", repo: "Hugosterberg/pump" },
   { id: "pump-shopify", name: "pump-shopify", repo: "Hugosterberg/pump-shopify" },
   { id: "los-tios", name: "los-tios", repo: "Hugosterberg/los-tios" },

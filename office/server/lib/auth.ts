@@ -1,12 +1,12 @@
 /**
- * Optional bearer auth for write routes when deployed (office.baidigital.xyz).
+ * Optional bearer auth for write routes when deployed (baidigital.office.xyz).
  * Local dev: if OFFICE_SECRET is unset, writes are allowed.
  */
 
 import type { Request, Response, NextFunction } from "express";
 
 export function requireWriteAuth(req: Request, res: Response, next: NextFunction): void {
-  const secret = String(process.env.OFFICE_SECRET || process.env.MISSION_CONTROL_SECRET || "").trim();
+  const secret = String(process.env.OFFICE_SECRET || "").trim();
   if (!secret) {
     next();
     return;

@@ -12,10 +12,11 @@
     "dev:server": "node --experimental-strip-types server/server.ts",
     "start": "node --experimental-strip-types server/server.ts",
     "worker": "node --experimental-strip-types server/worker.ts",
-    "build": "vite build",
+    "build": "vite build && node scripts/build-api.mjs",
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",
+    "typecheck:server": "tsc -p server/tsconfig.json",
     "typecheck": "tsc -p tsconfig.app.json --noEmit",
     "verify": "npm run typecheck && npm run lint && npm test && npm run build"
   },

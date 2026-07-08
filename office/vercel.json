@@ -10,7 +10,7 @@
   "functions": {
     "api/index.mjs": {
       "maxDuration": 60,
-      "includeFiles": "server/**"
+      "includeFiles": "api/server.bundle.mjs"
     }
   },
   "headers": [
