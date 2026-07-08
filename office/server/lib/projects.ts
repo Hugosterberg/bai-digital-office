@@ -23,7 +23,7 @@ export interface Project {
 }
 
 const DEFAULT_PROJECTS: Project[] = [
-  { id: "bai-digital-office", name: "bai digital office", repo: "Hugosterberg/bai-digital-office", domain: "baidigital.office.xyz" },
+  { id: "bai-digital-office", name: "bai digital office", repo: "Hugosterberg/bai-digital-office", domain: "office.baidigital.xyz" },
   { id: "automazing", name: "automazing", repo: "Hugosterberg/automazing-flow", domain: "automazing.life" },
   { id: "baidigital-site", name: "baidigital.xyz", repo: "Hugosterberg/bai-digital", domain: "baidigital.xyz" },
   { id: "bitcoinlivet", name: "bitcoinlivet", repo: "Hugosterberg/bitcoinlivet" },

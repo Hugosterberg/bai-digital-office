@@ -1,5 +1,5 @@
 /**
- * Optional bearer auth for write routes when deployed (baidigital.office.xyz).
+ * Optional bearer auth for write routes when deployed (office.baidigital.xyz).
  * Local dev: if OFFICE_SECRET is unset, writes are allowed.
  */
 
